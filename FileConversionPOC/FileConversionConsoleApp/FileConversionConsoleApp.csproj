@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- Suppress Telerik license warnings during build -->
+    <SuppressTeleriLicenseWarnings>true</SuppressTeleriLicenseWarnings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Telerik Document Processing Libraries -->
+    <PackageReference Include="Telerik.Documents.Core" Version="2026.2.514" />
+    <PackageReference Include="Telerik.Documents.Flow" Version="2026.2.514" />
+  </ItemGroup>
+
+</Project>
