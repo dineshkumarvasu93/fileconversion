@@ -31,10 +31,10 @@ obj/
 packages/
 .nuget/
 
-# Output files
+# Migration output (RTF conversions, reports, logs)
 *.rtf
-sample.xhtml
-output_*.rtf
+Reports/
+publish/
 
 # Local user-specific files
 *.suo
