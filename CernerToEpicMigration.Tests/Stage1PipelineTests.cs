@@ -71,6 +71,36 @@ public class Stage1PipelineTests
     }
 
     [Fact]
+    public async Task A_document_that_cannot_be_base64_decoded_is_moved_to_the_error_folder()
+    {
+        using TempWorkspace workspace = new();
+        DateFolder folder = workspace.AddDateFolder("2026-08-01", 2);
+
+        // One file arrives without its Base64 envelope; the other is a normal document.
+        File.WriteAllText(
+            Path.Combine(folder.Path, "doc_1.xhtml"), TempWorkspace.SampleXhtml, Encoding.UTF8);
+
+        using ReportWriter reportWriter = workspace.CreateReportWriter();
+        Stage1Result result = await workspace.CreatePipeline(reportWriter)
+            .RunAsync(new RunOptions(DateFolder: null, Resume: false), CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal(1, workspace.Metrics.Failed);
+        Assert.Equal(1, workspace.Metrics.Succeeded);
+        Assert.Single(workspace.OutputFiles("2026-08-01"));
+
+        string errorLog = workspace.ErrorFiles("2026-08-01").Single(path => path.EndsWith(".error.log", StringComparison.Ordinal));
+        string log = TempWorkspace.ReadShared(errorLog);
+        Assert.Contains(nameof(Base64DecodingException), log, StringComparison.Ordinal);
+        Assert.Contains("Category: Permanent", log, StringComparison.Ordinal);
+        Assert.Contains("Attempts: 1", log, StringComparison.Ordinal);  // permanent, so never retried
+
+        // The unreadable file itself moved out of the input folder, the good one was archived.
+        Assert.Contains(workspace.ErrorFiles("2026-08-01"), path => path.EndsWith("doc_1.xhtml", StringComparison.Ordinal));
+        Assert.Empty(Directory.GetFiles(folder.Path));
+    }
+
+    [Fact]
     public async Task A_checkpoint_records_the_completed_folders()
     {
         using TempWorkspace workspace = new();

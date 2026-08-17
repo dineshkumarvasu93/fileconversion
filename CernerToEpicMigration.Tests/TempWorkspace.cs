@@ -62,10 +62,21 @@ public sealed class TempWorkspace : IDisposable
         Directory.CreateDirectory(path);
 
         for (int i = 1; i <= count; i++)
-            File.WriteAllText(Path.Combine(path, $"doc_{i}.xhtml"), content ?? SampleXhtml, Encoding.UTF8);
+            WriteInput(Path.Combine(path, $"doc_{i}.xhtml"), content ?? SampleXhtml);
 
         return new DateFolder(name, path);
     }
+
+    /// <summary>
+    /// Writes an input document the way the extract delivers it: the XHTML encoded with
+    /// <paramref name="encoding"/> and then wrapped in a Base64 envelope.
+    /// </summary>
+    public static void WriteInput(string path, string xhtml, Encoding? encoding = null) =>
+        File.WriteAllText(path, Base64Envelope(xhtml, encoding), Encoding.ASCII);
+
+    /// <summary>The Base64 envelope for an XHTML document.</summary>
+    public static string Base64Envelope(string xhtml, Encoding? encoding = null) =>
+        Convert.ToBase64String((encoding ?? new UTF8Encoding(false)).GetBytes(xhtml));
 
     public FileManager CreateFileManager() => new(Config);
 

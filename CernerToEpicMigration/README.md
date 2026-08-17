@@ -1,8 +1,13 @@
 # Cerner to Epic Migration — Stage 1 (XHTML → RTF)
 
 Implementation of **Stage 1 only** from `CernerToEpic-Migration-Design-Document.md`: read Cerner
-XHTML documents from date-wise input folders, convert them to RTF with Telerik Document Processing,
-and file the results, with batching, retries, reporting and checkpoint/resume around it.
+XHTML documents from date-wise input folders, Base64-decode them, convert them to RTF with Telerik
+Document Processing, and file the results, with batching, retries, reporting and checkpoint/resume
+around it.
+
+Input documents arrive **Base64-encoded**: the bytes on disk are an envelope, and the XHTML is
+inside it. Each file is decoded before anything else touches it, and a file whose envelope cannot be
+decoded is moved to the error folder without being converted.
 
 Stage 2 (RTF → HL7) is **not** in this build. Per section 17 of the design document, the metadata
 that PID/PV1/TXA need is still unsourced, so `--stage 2` and `--stage both` are rejected with an
@@ -18,6 +23,7 @@ build and migration servers.
 | Design document | Implemented by |
 | --- | --- |
 | 8.1 XHTML → RTF conversion | [Processing/TelerikXhtmlToRtfConverter.cs](Processing/TelerikXhtmlToRtfConverter.cs) |
+| Base64 input decoding | [Processing/Base64InputDecoder.cs](Processing/Base64InputDecoder.cs), [Processing/XhtmlDocumentReader.cs](Processing/XhtmlDocumentReader.cs) |
 | 7.1–7.4 folder layout and file lifecycle | [Processing/FileDiscoveryService.cs](Processing/FileDiscoveryService.cs), [Processing/FileManager.cs](Processing/FileManager.cs) |
 | 9 threading, batching | [Processing/Stage1Pipeline.cs](Processing/Stage1Pipeline.cs) (`Parallel.ForEachAsync`) |
 | 10 retry and error categories | [Processing/ErrorClassifier.cs](Processing/ErrorClassifier.cs), `Stage1Pipeline.ProcessFileAsync` |
@@ -29,7 +35,7 @@ build and migration servers.
 ## Folder layout
 
 ```
-{InputBasePath}\2026-08-01\patient_doc_001.xhtml     input
+{InputBasePath}\2026-08-01\patient_doc_001.xhtml     input (Base64-encoded XHTML)
                           \archive\                  successfully converted originals
                           \error\                    failed originals + <name>.error.log
 {OutputRtfBasePath}\2026-08-01\patient_doc_001.rtf   converted output
@@ -54,7 +60,8 @@ rather than a failed overnight run:
 | **Disk space** | The scan totals the input size and warns if the output volume has less than ~1.2x that free. Advisory — the operator decides. |
 | **Checkpoint safety** | A run started *without* `--resume` renames any existing `checkpoint.json` to `checkpoint_{timestamp}.json` rather than overwriting the record of what was done. |
 | **Signals** | `Ctrl+C` and `SIGTERM` (service stop, `kill`) both stop after in-flight files, with the checkpoint and reports written. |
-| **Encoding** | Documents are decoded by BOM, then by declared XML/meta charset, then UTF-8, with a windows-1252 fallback for legacy bytes. Accents, degree and micro signs survive as RTF `\uN` escapes. |
+| **Base64 envelope** | Every input file is Base64-decoded first. Line-wrapped envelopes and a leading BOM are accepted; anything that is not decodable Base64 (including unwrapped markup) is a permanent failure and goes straight to the error folder — never to the converter. |
+| **Encoding** | The *decoded* payload is decoded by BOM, then by declared XML/meta charset, then UTF-8, with a windows-1252 fallback for legacy bytes. Accents, degree and micro signs survive as RTF `\uN` escapes. |
 | **Error report** | Written with a shared handle and auto-flush, so it can be opened or tailed mid-run; a failure to write it is logged and never aborts processing. |
 
 ## Tests
@@ -63,10 +70,11 @@ rather than a failed overnight run:
 dotnet test          # from the repository root (CernerToEpicMigration.sln)
 ```
 
-60 tests cover encoding detection, error classification, CLI parsing, configuration validation,
-archive/error file handling, CSV escaping, the run lock, pre-flight, and end-to-end pipeline runs
-(including retry-then-error, checkpointing, resume and cancellation) against the real Telerik
-converter — so a licence problem fails the test run, not production.
+75 tests cover Base64 decoding, encoding detection, error classification, CLI parsing, configuration
+validation, archive/error file handling, CSV escaping, the run lock, pre-flight, and end-to-end
+pipeline runs (including retry-then-error, an undecodable envelope, checkpointing, resume and
+cancellation) against the real Telerik converter — so a licence problem fails the test run, not
+production.
 
 ## Running
 
@@ -134,7 +142,8 @@ Failures are classified before anything is retried (design document 10.1):
 
 - **Transient** (file locked, I/O timeout, memory pressure) — retried up to `MaxRetryCount` with an
   increasing delay.
-- **Permanent** (malformed or unsupported document) — failed immediately, no retries.
+- **Permanent** (undecodable Base64 envelope, malformed or unsupported document) — failed
+  immediately, no retries.
 - **Fatal** (disk full, access denied, licensing) — the run stops; input files are left in place so
   nothing is lost, and the exit code is `3`.
 
@@ -151,9 +160,11 @@ failure.
 
 ## Known limits before the bulk run
 
-- **Telerik's HTML importer never rejects anything.** Malformed markup, empty files and binary
-  content all import and produce an RTF. Stage 1 reports *conversion* failures, not *content*
-  correctness, so step 5 of the checklist is not optional.
+- **Telerik's HTML importer never rejects anything.** Once the envelope is off, malformed markup,
+  empty documents and binary content all import and produce an RTF. Base64 decoding is the only gate
+  on the way in, and it only proves the envelope was intact — not that the payload is real XHTML. So
+  Stage 1 reports *conversion* failures, not *content* correctness, and step 5 of the checklist is
+  not optional.
 - **Windows long paths.** Paths over 260 characters need `LongPathsEnabled=1` on the server;
   without it those documents fail as `PathTooLongException` (permanent, one file at a time).
 - **Memory.** The file list of the date folder being processed is held in memory (roughly 200 bytes
@@ -170,6 +181,8 @@ failure.
   content import without throwing and produce an RTF file. Stage 1 therefore reports *conversion*
   failures, not *content* correctness — validate a representative sample of the RTF output before a
   bulk run (design document risk 1).
+- Base64 decoding runs before the converter, so a broken envelope is caught cleanly; it is not a
+  content check, and a well-formed envelope around junk still reaches the importer.
 - RTF is written without a byte order mark, so the file starts with `{\rtf1` as importers expect.
 - Each output file is written to `<name>.rtf.tmp` and then renamed, so an interrupted run cannot
   leave a partially written RTF behind.

@@ -89,7 +89,13 @@ public sealed class PreflightCheck
         try
         {
             Directory.CreateDirectory(workingFolder);
-            File.WriteAllText(inputPath, SmokeTestXhtml, Encoding.UTF8);
+
+            // Written through the same Base64 envelope as a real input document, so the
+            // smoke test exercises the whole read path and not just the Telerik call.
+            File.WriteAllText(
+                inputPath,
+                Convert.ToBase64String(new UTF8Encoding(false).GetBytes(SmokeTestXhtml)),
+                Encoding.ASCII);
 
             ConversionOutcome outcome = _converter.Convert(inputPath, outputPath);
             if (outcome.OutputBytes == 0)

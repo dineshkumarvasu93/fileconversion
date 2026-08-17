@@ -37,6 +37,9 @@ public static class ErrorClassifier
             OutOfMemoryException => ErrorCategory.Transient,
             OperationCanceledException => ErrorCategory.Transient,
 
+            // A file that is not a decodable Base64 envelope will not decode next time either.
+            Base64DecodingException => ErrorCategory.Permanent,
+
             // Malformed or unsupported document content.
             XmlException => ErrorCategory.Permanent,
             FormatException => ErrorCategory.Permanent,

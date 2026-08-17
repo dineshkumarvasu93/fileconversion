@@ -18,7 +18,7 @@ public class ConversionTests
         using TempWorkspace workspace = new();
         string input = Path.Combine(workspace.InputPath, "note.xhtml");
         string output = Path.Combine(workspace.OutputPath, "note.rtf");
-        File.WriteAllText(input, TempWorkspace.SampleXhtml, Encoding.UTF8);
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
 
         ConversionOutcome outcome = workspace.CreateConverter().Convert(input, output);
 
@@ -35,7 +35,7 @@ public class ConversionTests
         using TempWorkspace workspace = new();
         string input = Path.Combine(workspace.InputPath, "note.xhtml");
         string output = Path.Combine(workspace.OutputPath, "note.rtf");
-        File.WriteAllText(input, TempWorkspace.SampleXhtml, Encoding.UTF8);
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
 
         workspace.CreateConverter().Convert(input, output);
 
@@ -50,10 +50,9 @@ public class ConversionTests
         using TempWorkspace workspace = new();
         string input = Path.Combine(workspace.InputPath, "accents.xhtml");
         string output = Path.Combine(workspace.OutputPath, "accents.rtf");
-        File.WriteAllText(
+        TempWorkspace.WriteInput(
             input,
-            """<?xml version="1.0" encoding="utf-8"?><html><body><p>Dr Müller — 37°C, 5 µg/mL</p></body></html>""",
-            new UTF8Encoding(false));
+            """<?xml version="1.0" encoding="utf-8"?><html><body><p>Dr Müller — 37°C, 5 µg/mL</p></body></html>""");
 
         workspace.CreateConverter().Convert(input, output);
 
@@ -72,10 +71,10 @@ public class ConversionTests
         using TempWorkspace workspace = new();
         string input = Path.Combine(workspace.InputPath, "legacy.xhtml");
         string output = Path.Combine(workspace.OutputPath, "legacy.rtf");
-        File.WriteAllBytes(
+        TempWorkspace.WriteInput(
             input,
-            Encoding.GetEncoding("windows-1252").GetBytes(
-                """<?xml version="1.0" encoding="windows-1252"?><html><body><p>Café 37°C</p></body></html>"""));
+            """<?xml version="1.0" encoding="windows-1252"?><html><body><p>Café 37°C</p></body></html>""",
+            Encoding.GetEncoding("windows-1252"));
 
         workspace.CreateConverter().Convert(input, output);
 
@@ -100,10 +99,41 @@ public class ConversionTests
         using TempWorkspace workspace = new();
         string input = Path.Combine(workspace.InputPath, "note.xhtml");
         string output = Path.Combine(workspace.OutputPath, "note.rtf");
-        File.WriteAllText(input, TempWorkspace.SampleXhtml, Encoding.UTF8);
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
 
         workspace.CreateConverter().Convert(input, output);
 
         Assert.Empty(Directory.GetFiles(workspace.OutputPath, "*.tmp"));
+    }
+
+    [Fact]
+    public void A_document_that_is_not_base64_encoded_fails_before_the_converter_writes_anything()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "raw.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "raw.rtf");
+
+        // Unwrapped markup: '<' is not a Base64 character, so the envelope cannot be read.
+        File.WriteAllText(input, TempWorkspace.SampleXhtml, Encoding.UTF8);
+
+        Assert.Throws<Base64DecodingException>(() => workspace.CreateConverter().Convert(input, output));
+        Assert.False(File.Exists(output));
+        Assert.Empty(Directory.GetFiles(workspace.OutputPath, "*.tmp"));
+    }
+
+    [Fact]
+    public void The_reported_input_size_is_the_size_of_the_file_on_disk()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "note.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "note.rtf");
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
+
+        ConversionOutcome outcome = workspace.CreateConverter().Convert(input, output);
+
+        // Not the decoded payload: the reports and the disk-space estimate talk about
+        // the files an operator can see in the input folder.
+        Assert.Equal(new FileInfo(input).Length, outcome.InputBytes);
+        Assert.True(outcome.InputBytes > TempWorkspace.SampleXhtml.Length);
     }
 }

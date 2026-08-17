@@ -7,14 +7,16 @@ namespace CernerToEpicMigration.Processing;
 public readonly record struct XhtmlDocument(string Text, Encoding Encoding, long ByteCount);
 
 /// <summary>
-/// Reads an XHTML document using the encoding the document itself declares.
+/// Reads an XHTML document out of its Base64 envelope, using the encoding the document
+/// itself declares.
 /// </summary>
 /// <remarks>
 /// Clinical text is full of accented names, degree signs and micro symbols. Decoding a
 /// windows-1252 or ISO-8859-1 export as UTF-8 does not throw - it silently substitutes
 /// replacement characters - so the corruption would only surface in Epic. The order of
 /// preference is: byte order mark, then the declared encoding of the XML declaration or the
-/// HTML meta tag, then UTF-8.
+/// HTML meta tag, then UTF-8. The charset is declared inside the payload, so the Base64
+/// envelope (see <see cref="Base64InputDecoder"/>) has to come off first.
 /// </remarks>
 public static partial class XhtmlDocumentReader
 {
@@ -23,12 +25,22 @@ public static partial class XhtmlDocumentReader
 
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
+    /// <summary>
+    /// Reads an input document: the Base64 envelope comes off first, then the payload is
+    /// decoded with the encoding it declares.
+    /// </summary>
+    /// <exception cref="Base64DecodingException">The file is not a decodable envelope.</exception>
     public static XhtmlDocument Read(string path)
     {
         byte[] bytes = File.ReadAllBytes(path);
-        return Decode(bytes);
+        byte[] payload = Base64InputDecoder.Decode(bytes);
+
+        // ByteCount stays the size on disk: the progress figures, the disk-space estimate
+        // and the reports all talk about the files the operator can actually see.
+        return Decode(payload) with { ByteCount = bytes.Length };
     }
 
+    /// <summary>Decodes the bytes of an XHTML document - the payload, not the envelope.</summary>
     public static XhtmlDocument Decode(byte[] bytes)
     {
         if (TryReadByteOrderMark(bytes, out Encoding? bomEncoding, out int preambleLength))
@@ -57,7 +69,7 @@ public static partial class XhtmlDocumentReader
         }
     }
 
-    private static bool TryReadByteOrderMark(byte[] bytes, out Encoding encoding, out int preambleLength)
+    internal static bool TryReadByteOrderMark(byte[] bytes, out Encoding encoding, out int preambleLength)
     {
         if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
         {
