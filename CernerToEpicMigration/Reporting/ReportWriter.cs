@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using CernerToEpicMigration.Configuration;
@@ -13,11 +14,19 @@ namespace CernerToEpicMigration.Reporting;
 /// </summary>
 public sealed class ReportWriter : IDisposable
 {
+    /// <summary>Rows buffered before a flush is forced, however recent the last one was.</summary>
+    private const int FlushRowThreshold = 500;
+
+    /// <summary>How stale the on-disk error report is allowed to get while a run is going.</summary>
+    private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(2);
+
     private readonly MigrationConfig _config;
     private readonly string _timestamp;
     private readonly object _errorLock = new();
+    private readonly Stopwatch _sinceLastFlush = new();
 
     private StreamWriter? _errorWriter;
+    private int _rowsSinceLastFlush;
 
     public ReportWriter(MigrationConfig config)
     {
@@ -44,10 +53,11 @@ public sealed class ReportWriter : IDisposable
                 Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
 
                 // FileShare.ReadWrite so an operator can open or tail the error report while a
-                // multi-hour run is still going; AutoFlush so what they see is current.
+                // multi-hour run is still going.
                 FileStream stream = new(ErrorReportPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-                _errorWriter = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
+                _errorWriter = new StreamWriter(stream, Encoding.UTF8);
                 _errorWriter.WriteLine("File Name,Date Folder,Error Category,Error Type,Error Message,Retry Count,Timestamp");
+                _sinceLastFlush.Start();
                 HasErrorReport = true;
             }
 
@@ -59,7 +69,34 @@ public sealed class ReportWriter : IDisposable
                 Escape(failure.ErrorMessage),
                 failure.Attempts.ToString(CultureInfo.InvariantCulture),
                 failure.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)));
+
+            // Flushing every row makes the error path a disk round-trip per failure, and every
+            // worker queues behind this lock to take it. Batching keeps a tailed report at most
+            // FlushInterval behind while a run where a systemic fault fails millions of
+            // documents no longer stalls on the reporting.
+            if (++_rowsSinceLastFlush >= FlushRowThreshold || _sinceLastFlush.Elapsed >= FlushInterval)
+                FlushCore();
         }
+    }
+
+    /// <summary>
+    /// Writes any buffered error rows to disk. Called on a threshold and an interval while a run
+    /// is going, and on <see cref="Dispose"/>; call it directly when the file has to be current.
+    /// </summary>
+    public void Flush()
+    {
+        lock (_errorLock)
+        {
+            FlushCore();
+        }
+    }
+
+    /// <summary>Flush without taking the lock; callers already hold it.</summary>
+    private void FlushCore()
+    {
+        _errorWriter?.Flush();
+        _rowsSinceLastFlush = 0;
+        _sinceLastFlush.Restart();
     }
 
     /// <summary>Writes the end-of-run summary CSV, including the per-folder breakdown.</summary>

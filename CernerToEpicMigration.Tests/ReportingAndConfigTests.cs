@@ -17,6 +17,7 @@ public class ReportWriterTests
         writer.RecordFailure(new FileFailure(
             "doc_1.xhtml", "2026-08-01", ErrorCategory.Permanent, "XmlException",
             "Invalid element, line 42, column 7", 3, DateTimeOffset.UtcNow, null));
+        writer.Flush();
 
         string[] lines = TempWorkspace.ReadSharedLines(writer.ErrorReportPath);
         Assert.Equal(2, lines.Length);
@@ -32,6 +33,7 @@ public class ReportWriterTests
         writer.RecordFailure(new FileFailure(
             "doc_1.xhtml", "2026-08-01", ErrorCategory.Permanent, "XmlException",
             "Unexpected \"tag\"", 1, DateTimeOffset.UtcNow, null));
+        writer.Flush();
 
         Assert.Contains("\"Unexpected \"\"tag\"\"\"", TempWorkspace.ReadSharedLines(writer.ErrorReportPath)[1], StringComparison.Ordinal);
     }
@@ -96,6 +98,15 @@ public class MigrationConfigTests
         workspace.Config.Processing.BatchSize = batchSize;
 
         Assert.Contains(workspace.Config.Validate(), error => error.Contains("BatchSize", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_negative_error_log_cap_is_reported()
+    {
+        using TempWorkspace workspace = new();
+        workspace.Config.Processing.MaxErrorLogFiles = -1;
+
+        Assert.Contains(workspace.Config.Validate(), error => error.Contains("MaxErrorLogFiles", StringComparison.Ordinal));
     }
 
     [Fact]

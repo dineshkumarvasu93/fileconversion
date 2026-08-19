@@ -66,6 +66,9 @@ public sealed class MigrationConfig
         if (string.IsNullOrWhiteSpace(Processing.FileSearchPattern))
             errors.Add("Processing.FileSearchPattern is not configured.");
 
+        if (Processing.MaxErrorLogFiles < 0)
+            errors.Add("Processing.MaxErrorLogFiles cannot be negative (0 = no cap).");
+
         if (Dashboard.RefreshIntervalSeconds <= 0)
             errors.Add("Dashboard.RefreshIntervalSeconds must be greater than zero.");
 
@@ -100,8 +103,30 @@ public sealed class ProcessingOptions
     /// <summary>Overwrite an existing RTF file. When false, an existing output is treated as a failure.</summary>
     public bool OverwriteExistingRtf { get; set; } = true;
 
+    /// <summary>
+    /// Feature flag: write the RTF wrapped in a Base64 envelope instead of as plain RTF,
+    /// mirroring the envelope the input documents arrive in. The file name and the
+    /// <c>.rtf</c> extension are unchanged - only the bytes inside differ - so a consumer
+    /// that expects plain RTF must be switched over at the same time. Off means plain RTF.
+    /// </summary>
+    public bool EncodeRtfOutputAsBase64 { get; set; }
+
     /// <summary>Kept for parity with the design document; Stage 1 is the only stage in this build.</summary>
     public bool EnableStage1 { get; set; } = true;
+
+    /// <summary>
+    /// Count every input file before conversion starts, so the progress bar and the
+    /// remaining-time estimate cover the whole run. This costs one extra directory walk of the
+    /// entire input tree, which is minutes rather than seconds on a network share; turn it off
+    /// there and the totals fill in per date folder as the run reaches them.
+    /// </summary>
+    public bool PreScanForEstimates { get; set; } = true;
+
+    /// <summary>
+    /// Cap on per-file <c>.error.log</c> files written across a run. 0 means no cap. Every
+    /// failure stays in the error report CSV and the run log regardless.
+    /// </summary>
+    public int MaxErrorLogFiles { get; set; }
 
     /// <summary>Effective worker count after resolving the auto-detect value.</summary>
     public int EffectiveParallelism =>

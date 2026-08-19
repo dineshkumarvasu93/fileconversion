@@ -52,6 +52,9 @@ public sealed class Stage1Pipeline
     /// <summary>RTF output runs about 1.2x the size of the XHTML input (design document 12.3).</summary>
     private const double RtfSizeFactor = 1.2;
 
+    /// <summary>A Base64 envelope turns every three bytes into four.</summary>
+    private const double Base64SizeFactor = 4d / 3d;
+
     /// <summary>--dry-run: report what would be processed without touching anything.</summary>
     public IReadOnlyList<(DateFolder Folder, FolderScan Scan)> Scan(string? dateFolder) =>
         _discovery.DiscoverFolders(dateFolder)
@@ -84,33 +87,20 @@ public sealed class Stage1Pipeline
             _metrics.BaselineFailed = checkpoint.TotalFailed;
         }
 
+        if (options.Resume && !_config.Processing.ArchiveOnSuccess)
+        {
+            _logger.LogInformation(
+                "Resume with ArchiveOnSuccess=false: converted documents stay in the input folder, so an " +
+                "interrupted date folder is resumed by skipping the documents that already have an RTF.");
+        }
+
         if (folders.Count == 0)
         {
             _logger.LogWarning("No date folders with input files found under {Path}.", _config.InputBasePath);
             return new Stage1Result { Completed = true, Folders = Array.Empty<FolderStatistics>() };
         }
 
-        // Counting up front is one extra directory scan, but it is what makes the
-        // progress bar and the remaining-time estimate meaningful.
-        Stopwatch scanTimer = Stopwatch.StartNew();
-        Dictionary<string, int> fileCounts = new(StringComparer.Ordinal);
-        long inputBytes = 0;
-        foreach (DateFolder folder in folders)
-        {
-            FolderScan scan = _discovery.Scan(folder);
-            fileCounts[folder.Name] = scan.Files;
-            inputBytes += scan.Bytes;
-            _metrics.RegisterFolder(folder.Name, scan.Files);
-        }
-
-        scanTimer.Stop();
-        _logger.LogInformation(
-            "Discovered {Files:N0} file(s) ({Gigabytes:N1} GB) across {Folders} date folder(s) in {Elapsed:N1}s. " +
-            "Parallelism={Threads}, BatchSize={BatchSize}.",
-            _metrics.TotalFound, AsGigabytes(inputBytes), folders.Count, scanTimer.Elapsed.TotalSeconds,
-            _config.Processing.EffectiveParallelism, _config.Processing.BatchSize);
-
-        WarnIfDiskSpaceIsShort(inputBytes);
+        IReadOnlyDictionary<string, int> fileCounts = PreScan(folders);
 
         using CancellationTokenSource runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _runCts = runCts;
@@ -126,7 +116,12 @@ public sealed class Stage1Pipeline
                 break;
             }
 
-            bool folderCompleted = await ProcessFolderAsync(folder, fileCounts[folder.Name], checkpoint, runCts)
+            bool folderCompleted = await ProcessFolderAsync(
+                    folder,
+                    fileCounts.TryGetValue(folder.Name, out int count) ? count : UnknownFileCount,
+                    options.Resume,
+                    checkpoint,
+                    runCts)
                 .ConfigureAwait(false);
 
             if (folderCompleted)
@@ -152,9 +147,53 @@ public sealed class Stage1Pipeline
         };
     }
 
+    /// <summary>Marks a folder whose file count was never established, because the pre-scan was off.</summary>
+    private const int UnknownFileCount = -1;
+
+    /// <summary>
+    /// Counts every input file before conversion starts so the progress bar and the
+    /// remaining-time estimate cover the whole run. Returns an empty map when the pre-scan is
+    /// switched off, in which case each folder is counted as the run reaches it.
+    /// </summary>
+    private IReadOnlyDictionary<string, int> PreScan(IReadOnlyList<DateFolder> folders)
+    {
+        if (!_config.Processing.PreScanForEstimates)
+        {
+            _logger.LogInformation(
+                "Pre-scan disabled: {Folders} date folder(s) to process, each counted as the run reaches it. " +
+                "Progress totals grow folder by folder and the disk-space check is skipped. " +
+                "Parallelism={Threads}, BatchSize={BatchSize}.",
+                folders.Count, _config.Processing.EffectiveParallelism, _config.Processing.BatchSize);
+
+            return new Dictionary<string, int>(StringComparer.Ordinal);
+        }
+
+        Stopwatch scanTimer = Stopwatch.StartNew();
+        Dictionary<string, int> fileCounts = new(StringComparer.Ordinal);
+        long inputBytes = 0;
+
+        foreach (DateFolder folder in folders)
+        {
+            FolderScan scan = _discovery.Scan(folder);
+            fileCounts[folder.Name] = scan.Files;
+            inputBytes += scan.Bytes;
+            _metrics.RegisterFolder(folder.Name, scan.Files);
+        }
+
+        scanTimer.Stop();
+        _logger.LogInformation(
+            "Discovered {Files:N0} file(s) ({Gigabytes:N1} GB) across {Folders} date folder(s) in {Elapsed:N1}s. " +
+            "Parallelism={Threads}, BatchSize={BatchSize}.",
+            _metrics.TotalFound, AsGigabytes(inputBytes), folders.Count, scanTimer.Elapsed.TotalSeconds,
+            _config.Processing.EffectiveParallelism, _config.Processing.BatchSize);
+
+        WarnIfDiskSpaceIsShort(inputBytes);
+        return fileCounts;
+    }
+
     /// <summary>Processes one date folder batch by batch. Returns false if the run was stopped.</summary>
     private async Task<bool> ProcessFolderAsync(
-        DateFolder folder, int fileCount, Checkpoint checkpoint, CancellationTokenSource runCts)
+        DateFolder folder, int fileCount, bool resume, Checkpoint checkpoint, CancellationTokenSource runCts)
     {
         _metrics.SetCurrentFolder(folder.Name);
 
@@ -162,13 +201,20 @@ public sealed class Stage1Pipeline
         // this folder, and a lazy directory enumeration can skip entries while that happens.
         string[] files = _discovery.EnumerateFiles(folder).ToArray();
 
-        if (files.Length != fileCount)
+        if (fileCount == UnknownFileCount)
+        {
+            // No pre-scan, so this is the first time the folder has been counted.
+            _metrics.RegisterFolder(folder.Name, files.Length);
+        }
+        else if (files.Length != fileCount)
         {
             _logger.LogWarning(
                 "Folder {Folder} holds {Actual:N0} file(s) at processing time; the initial scan counted {Expected:N0}.",
                 folder.Name, files.Length, fileCount);
             _metrics.AdjustFolderTotal(folder.Name, files.Length - fileCount);
         }
+
+        files = SkipAlreadyConverted(folder, files, resume);
 
         _logger.LogInformation("Processing date folder {Folder} ({Files:N0} file(s)).", folder.Name, files.Length);
 
@@ -209,6 +255,10 @@ public sealed class Stage1Pipeline
                 break;
             }
 
+            // A batch boundary is where the run becomes durable, so the error report is brought
+            // up to date with the checkpoint rather than being left in the write buffer.
+            _reportWriter.Flush();
+
             checkpoint.LastProcessedFolder = folder.Name;
             checkpoint.LastProcessedFile = Path.GetFileName(batch[^1]);
             checkpoint.TotalSucceeded = _metrics.BaselineSucceeded + _metrics.Succeeded;
@@ -233,6 +283,38 @@ public sealed class Stage1Pipeline
         }
 
         return completed;
+    }
+
+    /// <summary>
+    /// Drops the documents of a partly finished folder that a previous run already converted.
+    /// </summary>
+    /// <remarks>
+    /// With <c>ArchiveOnSuccess</c> on - the default - converted documents have already left the
+    /// input folder, so re-enumerating it is the resume: nothing here matches and the check is
+    /// skipped. With archiving off they stay put, and without this a run killed 900k documents
+    /// into a folder would convert all 900k again. The completed RTF is the marker because it is
+    /// written to a temp file and renamed, so its presence means a finished conversion; the cost
+    /// is one existence check per remaining file, paid only on a resume.
+    /// </remarks>
+    private string[] SkipAlreadyConverted(DateFolder folder, string[] files, bool resume)
+    {
+        if (!resume || _config.Processing.ArchiveOnSuccess || files.Length == 0)
+            return files;
+
+        string[] remaining = files
+            .Where(filePath => !File.Exists(_fileManager.GetRtfOutputPath(new WorkItem(filePath, folder))))
+            .ToArray();
+
+        int skipped = files.Length - remaining.Length;
+        if (skipped == 0)
+            return files;
+
+        _logger.LogInformation(
+            "Resume: {Skipped:N0} of {Total:N0} document(s) in {Folder} already have an RTF and are skipped.",
+            skipped, files.Length, folder.Name);
+
+        _metrics.AdjustFolderTotal(folder.Name, -skipped);
+        return remaining;
     }
 
     /// <summary>
@@ -373,7 +455,11 @@ public sealed class Stage1Pipeline
     /// </summary>
     private void WarnIfDiskSpaceIsShort(long inputBytes)
     {
-        long required = (long)(inputBytes * RtfSizeFactor);
+        double sizeFactor = _config.Processing.EncodeRtfOutputAsBase64
+            ? RtfSizeFactor * Base64SizeFactor
+            : RtfSizeFactor;
+
+        long required = (long)(inputBytes * sizeFactor);
 
         try
         {

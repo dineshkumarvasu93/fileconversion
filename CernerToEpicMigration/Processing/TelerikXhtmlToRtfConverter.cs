@@ -54,10 +54,27 @@ public sealed class TelerikXhtmlToRtfConverter : IXhtmlToRtfConverter
         // Write to a temporary file first so an interrupted run never leaves a
         // half-written RTF that a later stage would treat as valid.
         string tempPath = outputPath + ".tmp";
-        byte[] rtfBytes = RtfEncoding.GetBytes(rtf);
-        File.WriteAllBytes(tempPath, rtfBytes);
+        byte[] outputBytes = EncodeOutput(rtf);
+        File.WriteAllBytes(tempPath, outputBytes);
         File.Move(tempPath, outputPath, overwrite: true);
 
-        return new ConversionOutcome(InputBytes: input.ByteCount, OutputBytes: rtfBytes.Length);
+        return new ConversionOutcome(InputBytes: input.ByteCount, OutputBytes: outputBytes.Length);
+    }
+
+    /// <summary>
+    /// The bytes that go into the output file: the RTF itself, or - when
+    /// <see cref="ProcessingOptions.EncodeRtfOutputAsBase64"/> is on - a Base64 envelope
+    /// around it, the same shape the input documents arrive in. The envelope is written on
+    /// one line and in ASCII, so it decodes with a plain <c>Convert.FromBase64String</c>.
+    /// </summary>
+    private byte[] EncodeOutput(string rtf)
+    {
+        byte[] rtfBytes = RtfEncoding.GetBytes(rtf);
+
+        if (!_options.EncodeRtfOutputAsBase64)
+            return rtfBytes;
+
+        // System.Convert, not this class's own Convert method.
+        return Encoding.ASCII.GetBytes(System.Convert.ToBase64String(rtfBytes));
     }
 }

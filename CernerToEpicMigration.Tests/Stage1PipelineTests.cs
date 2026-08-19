@@ -140,6 +140,68 @@ public class Stage1PipelineTests
     }
 
     [Fact]
+    public async Task Resuming_with_archiving_off_skips_the_documents_that_already_have_an_rtf()
+    {
+        using TempWorkspace workspace = new();
+        // With archiving off the converted documents stay in the input folder, so the RTF that
+        // is already on disk is the only record of what an interrupted run finished.
+        workspace.Config.Processing.ArchiveOnSuccess = false;
+        workspace.AddDateFolder("2026-08-01", 3);
+
+        Directory.CreateDirectory(Path.Combine(workspace.OutputPath, "2026-08-01"));
+        string alreadyConverted = Path.Combine(workspace.OutputPath, "2026-08-01", "doc_1.rtf");
+        File.WriteAllText(alreadyConverted, "converted by the interrupted run", Encoding.UTF8);
+
+        using ReportWriter reportWriter = workspace.CreateReportWriter();
+        Stage1Result result = await workspace.CreatePipeline(reportWriter)
+            .RunAsync(new RunOptions(DateFolder: null, Resume: true), CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal(2, workspace.Metrics.Succeeded);
+        Assert.Equal("converted by the interrupted run", File.ReadAllText(alreadyConverted));
+        Assert.Equal(3, workspace.OutputFiles("2026-08-01").Length);
+    }
+
+    [Fact]
+    public async Task A_fresh_run_with_archiving_off_reconverts_everything()
+    {
+        using TempWorkspace workspace = new();
+        workspace.Config.Processing.ArchiveOnSuccess = false;
+        workspace.AddDateFolder("2026-08-01", 3);
+
+        Directory.CreateDirectory(Path.Combine(workspace.OutputPath, "2026-08-01"));
+        string stale = Path.Combine(workspace.OutputPath, "2026-08-01", "doc_1.rtf");
+        File.WriteAllText(stale, "output of an earlier run", Encoding.UTF8);
+
+        using ReportWriter reportWriter = workspace.CreateReportWriter();
+        await workspace.CreatePipeline(reportWriter)
+            .RunAsync(new RunOptions(DateFolder: null, Resume: false), CancellationToken.None);
+
+        // Without --resume the existing output is not a reason to skip anything.
+        Assert.Equal(3, workspace.Metrics.Succeeded);
+        Assert.NotEqual("output of an earlier run", File.ReadAllText(stale));
+    }
+
+    [Fact]
+    public async Task A_run_without_the_pre_scan_still_converts_and_counts_every_document()
+    {
+        using TempWorkspace workspace = new();
+        workspace.Config.Processing.PreScanForEstimates = false;
+        workspace.AddDateFolder("2026-08-01", 3);
+        workspace.AddDateFolder("2026-08-02", 2);
+
+        using ReportWriter reportWriter = workspace.CreateReportWriter();
+        Stage1Result result = await workspace.CreatePipeline(reportWriter)
+            .RunAsync(new RunOptions(DateFolder: null, Resume: false), CancellationToken.None);
+
+        Assert.True(result.Completed);
+        Assert.Equal(5, workspace.Metrics.Succeeded);
+        Assert.Equal(5, workspace.Metrics.TotalFound);
+        Assert.Equal(3, workspace.OutputFiles("2026-08-01").Length);
+        Assert.Equal(2, workspace.OutputFiles("2026-08-02").Length);
+    }
+
+    [Fact]
     public async Task A_run_that_is_cancelled_before_it_starts_converts_nothing()
     {
         using TempWorkspace workspace = new();

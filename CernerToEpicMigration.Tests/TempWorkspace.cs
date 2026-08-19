@@ -78,7 +78,7 @@ public sealed class TempWorkspace : IDisposable
     public static string Base64Envelope(string xhtml, Encoding? encoding = null) =>
         Convert.ToBase64String((encoding ?? new UTF8Encoding(false)).GetBytes(xhtml));
 
-    public FileManager CreateFileManager() => new(Config);
+    public FileManager CreateFileManager() => new(Config, NullLogger<FileManager>.Instance);
 
     public TelerikXhtmlToRtfConverter CreateConverter() => new(Config.Processing);
 

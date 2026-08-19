@@ -38,7 +38,8 @@ build and migration servers.
 {InputBasePath}\2026-08-01\patient_doc_001.xhtml     input (Base64-encoded XHTML)
                           \archive\                  successfully converted originals
                           \error\                    failed originals + <name>.error.log
-{OutputRtfBasePath}\2026-08-01\patient_doc_001.rtf   converted output
+{OutputRtfBasePath}\2026-08-01\patient_doc_001.rtf   converted output (plain RTF, or
+                                                     Base64-encoded when the flag is on)
 {ReportBasePath}\migration_report_{timestamp}.csv    summary + per-folder breakdown
                 \error_report_{timestamp}.csv        one row per failed document
                 \checkpoint.json                     written after every batch
@@ -57,12 +58,13 @@ rather than a failed overnight run:
 | --- | --- |
 | **Run lock** | One run per report folder. A second launch exits with code 2 instead of racing the first over the same files. |
 | **Pre-flight** | Input readable; output, report and log folders writable (probe file); a real one-document Telerik conversion as a licence/runtime smoke test. Any failure exits with code 2. |
-| **Disk space** | The scan totals the input size and warns if the output volume has less than ~1.2x that free. Advisory — the operator decides. |
+| **Disk space** | The scan totals the input size and warns if the output volume has less than ~1.2x that free (~1.6x with `EncodeRtfOutputAsBase64` on). Advisory — the operator decides. |
 | **Checkpoint safety** | A run started *without* `--resume` renames any existing `checkpoint.json` to `checkpoint_{timestamp}.json` rather than overwriting the record of what was done. |
 | **Signals** | `Ctrl+C` and `SIGTERM` (service stop, `kill`) both stop after in-flight files, with the checkpoint and reports written. |
-| **Base64 envelope** | Every input file is Base64-decoded first. Line-wrapped envelopes and a leading BOM are accepted; anything that is not decodable Base64 (including unwrapped markup) is a permanent failure and goes straight to the error folder — never to the converter. |
+| **Base64 envelope** | Every input file is Base64-decoded first. Line-wrapped envelopes and a leading BOM are accepted; anything that is not decodable Base64 (including unwrapped markup) is a permanent failure and goes straight to the error folder — never to the converter. `Processing.EncodeRtfOutputAsBase64` puts the same envelope back on the output: a single-line ASCII Base64 string that `Convert.FromBase64String` reads directly. |
 | **Encoding** | The *decoded* payload is decoded by BOM, then by declared XML/meta charset, then UTF-8, with a windows-1252 fallback for legacy bytes. Accents, degree and micro signs survive as RTF `\uN` escapes. |
-| **Error report** | Written with a shared handle and auto-flush, so it can be opened or tailed mid-run; a failure to write it is logged and never aborts processing. |
+| **Error report** | Written with a shared handle and flushed every 500 rows, every 2 seconds and at each batch boundary, so it can be opened or tailed mid-run without a disk round-trip per failure; a failure to write it is logged and never aborts processing. |
+| **Log rolling** | Log files roll at 256 MB as well as daily, so a run that starts failing in bulk cannot silently stop logging part-way through a day. |
 
 ## Tests
 
@@ -70,10 +72,11 @@ rather than a failed overnight run:
 dotnet test          # from the repository root (CernerToEpicMigration.sln)
 ```
 
-75 tests cover Base64 decoding, encoding detection, error classification, CLI parsing, configuration
-validation, archive/error file handling, CSV escaping, the run lock, pre-flight, and end-to-end
-pipeline runs (including retry-then-error, an undecodable envelope, checkpointing, resume and
-cancellation) against the real Telerik converter — so a licence problem fails the test run, not
+83 tests cover Base64 decoding and Base64 output encoding, encoding detection, error classification, CLI parsing, configuration
+validation, archive/error file handling (including repeated name collisions and the error-log cap),
+CSV escaping, the run lock, pre-flight, and end-to-end pipeline runs (including retry-then-error, an
+undecodable envelope, checkpointing, resume with and without archiving, a run without the pre-scan,
+and cancellation) against the real Telerik converter — so a licence problem fails the test run, not
 production.
 
 ## Running
@@ -95,6 +98,19 @@ configuration · `3` fatal error (run stopped early).
 
 `Ctrl+C` stops after the in-flight files; the checkpoint is saved and the reports are still written,
 so `--resume` picks up from there.
+
+### How `--resume` avoids redoing work
+
+`checkpoint.json` records the date folders that finished end to end, and those are skipped outright.
+Inside a folder that was interrupted, what stops the run redoing the documents it already converted
+depends on `ArchiveOnSuccess`:
+
+- **On (the default)** — converted documents have already moved to `{dateFolder}\archive`, so
+  re-enumerating the input folder returns only what is left.
+- **Off** — converted documents stay in the input folder, so the resumed run skips the ones that
+  already have an RTF next to them. Each output is written to a temp file and renamed, so an RTF
+  being there means the conversion finished. This costs one existence check per remaining file and
+  only happens on a resume; a run *without* `--resume` converts everything regardless.
 
 ### Publish for a migration server
 
@@ -133,8 +149,23 @@ renewed. Verified: the published `CernerToEpicMigration.exe` converts and report
 | `Processing.ConversionTimeoutSeconds` | `60` | Telerik import/export timeout per document |
 | `Processing.ArchiveOnSuccess` | `true` | Set false to leave inputs where they are |
 | `Processing.OverwriteExistingRtf` | `true` | False makes an existing RTF a failure instead |
+| `Processing.EncodeRtfOutputAsBase64` | `false` | Feature flag: write the RTF Base64-encoded instead of plain. The file name and the `.rtf` extension do not change — only the bytes inside — so the consumer has to be switched over at the same time |
+| `Processing.PreScanForEstimates` | `true` | Count everything up front so progress and ETA cover the whole run. Off saves a full directory walk on a slow share; totals then fill in folder by folder and the disk-space check is skipped |
+| `Processing.MaxErrorLogFiles` | `0` | Cap on per-file `.error.log` files, 0 = no cap. Every failure stays in the error report and the run log either way |
 | `Dashboard.RefreshIntervalSeconds` | `5` | Dashboard repaint interval |
 | `Dashboard.EnableConsoleDashboard` | `true` | Off for unattended/service runs |
+
+### Tuning for a bulk run
+
+| | Local SSD | Network share (SMB/NAS) |
+| --- | --- | --- |
+| `MaxDegreeOfParallelism` | `0` (= core count) — the conversion is CPU-bound | 2–3× core count — the workers are I/O-blocked, not CPU-bound |
+| `BatchSize` | `1000` | `250`–`500`, for finer checkpointing; the barrier between batches costs very little |
+| `PreScanForEstimates` | `true` | `false` if the up-front walk delays the first conversion by more than you want to wait |
+
+Measure one real date folder before committing to a schedule: a million documents is roughly 9 hours
+at 30 files/s and 28 hours at 10 files/s, and antivirus on the migration paths can dominate both
+figures.
 
 ## Error handling
 
@@ -149,7 +180,9 @@ Failures are classified before anything is retried (design document 10.1):
 
 A file that exhausts its attempts is moved to `{dateFolder}\error` with a `.error.log` beside it. If
 the file cannot be moved (still locked by another process), it stays in the input folder and the
-error log records that — it is never silently dropped.
+error log records that — it is never silently dropped. Set `MaxErrorLogFiles` to cap those per-file
+logs on a run where a systemic problem is failing documents in bulk; the failures still reach the
+error report CSV and the run log, and the documents are still moved out of the input folder.
 
 ## Telerik licence
 
@@ -170,6 +203,17 @@ failure.
 - **Memory.** The file list of the date folder being processed is held in memory (roughly 200 bytes
   per path — about 200 MB for a folder of a million documents). Split very large folders if that
   matters on the target server.
+- **Clear `archive\` before a full re-run of a date folder.** Re-running against an archive that
+  still holds the previous run's documents collides on every filename. Nothing is lost — the copies
+  are kept as `name_1`, `name_2` and so on — but every move takes the suffix path, and the archive
+  ends up holding several copies of the same million documents.
+- **One date folder holding a million documents is its own problem.** `archive\` and `error\` then
+  hold up to a million entries too, and NTFS enumeration and moves degrade noticeably at that size.
+  The date-wise layout normally keeps folders far smaller; if it does not, split them.
+- **One process per report folder.** The run lock allows a single run per `ReportBasePath`, so
+  sharding across machines means `--date-folder <name>` per machine, each with its own report
+  folder. `ReportBasePath` has no command-line flag — set it per machine in `appsettings.json` or
+  with `MigrationConfig__ReportBasePath`.
 - **Throughput figures** in the design document assume 2–3 MB documents on SSD. Measure with one
   real date folder before committing to a schedule.
 - **Antivirus** on the input/output folders can dominate runtime; consider an exclusion for the

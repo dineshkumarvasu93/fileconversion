@@ -73,6 +73,46 @@ public class FileManagerTests
     }
 
     [Fact]
+    public void Repeated_collisions_on_the_same_name_keep_every_copy()
+    {
+        // A date folder re-run against an archive that was never cleared collides on every
+        // file, so the suffix probe has to keep making progress rather than restarting at _1.
+        using TempWorkspace workspace = new();
+        DateFolder folder = workspace.AddDateFolder("2026-08-01", 1);
+        WorkItem item = new(Path.Combine(folder.Path, "doc_1.xhtml"), folder);
+        FileManager fileManager = workspace.CreateFileManager();
+
+        for (int run = 0; run < 3; run++)
+        {
+            TempWorkspace.WriteInput(item.FilePath, TempWorkspace.SampleXhtml);
+            fileManager.ArchiveSuccess(item);
+        }
+
+        string[] archived = workspace.ArchivedFiles("2026-08-01").Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal).ToArray()!;
+        Assert.Equal(new[] { "doc_1.xhtml", "doc_1_1.xhtml", "doc_1_2.xhtml" }, archived);
+    }
+
+    [Fact]
+    public void The_per_file_error_log_stops_at_MaxErrorLogFiles_but_the_documents_still_move()
+    {
+        using TempWorkspace workspace = new();
+        workspace.Config.Processing.MaxErrorLogFiles = 1;
+        DateFolder folder = workspace.AddDateFolder("2026-08-01", 2);
+        FileManager fileManager = workspace.CreateFileManager();
+
+        fileManager.MoveToError(new WorkItem(Path.Combine(folder.Path, "doc_1.xhtml"), folder), Failure("doc_1.xhtml"));
+        fileManager.MoveToError(new WorkItem(Path.Combine(folder.Path, "doc_2.xhtml"), folder), Failure("doc_2.xhtml"));
+
+        string[] errorFiles = workspace.ErrorFiles("2026-08-01").Select(Path.GetFileName).ToArray()!;
+
+        // Both documents moved, but only the first failure got a .error.log.
+        Assert.Contains("doc_1.xhtml", errorFiles);
+        Assert.Contains("doc_2.xhtml", errorFiles);
+        Assert.Single(errorFiles, name => name!.EndsWith(".error.log", StringComparison.Ordinal));
+        Assert.Equal(1, fileManager.ErrorLogsSuppressed);
+    }
+
+    [Fact]
     public void A_failed_document_is_moved_to_the_error_folder_with_its_log()
     {
         using TempWorkspace workspace = new();

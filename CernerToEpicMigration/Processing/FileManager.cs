@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Text;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
+using Microsoft.Extensions.Logging;
 
 namespace CernerToEpicMigration.Processing;
 
@@ -14,12 +16,25 @@ public sealed class FileManager
     public const string ErrorFolderName = "error";
 
     private readonly MigrationConfig _config;
-    private readonly object _collisionLock = new();
+    private readonly ILogger<FileManager> _logger;
 
-    public FileManager(MigrationConfig config)
+    /// <summary>
+    /// Next <c>_N</c> suffix to try for a destination path this run has already collided on,
+    /// so a re-run over a populated archive does not restart the probe at <c>_1</c> every time.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, int> _nextSuffix = new(StringComparer.OrdinalIgnoreCase);
+
+    private int _errorLogsWritten;
+    private int _errorLogsSuppressed;
+
+    public FileManager(MigrationConfig config, ILogger<FileManager> logger)
     {
         _config = config;
+        _logger = logger;
     }
+
+    /// <summary>Per-file error logs not written because <c>MaxErrorLogFiles</c> was reached.</summary>
+    public int ErrorLogsSuppressed => Volatile.Read(ref _errorLogsSuppressed);
 
     /// <summary>RTF destination for an input document, mirroring the date folder structure.</summary>
     public string GetRtfOutputPath(WorkItem item)
@@ -68,6 +83,9 @@ public sealed class FileManager
             moveError = exception.Message;
         }
 
+        if (!ShouldWriteErrorLog())
+            return moveError;
+
         string logPath = Path.Combine(errorFolder, Path.GetFileNameWithoutExtension(fileName) + ".error.log");
 
         StringBuilder log = new();
@@ -107,28 +125,63 @@ public sealed class FileManager
         }
         catch (IOException) when (File.Exists(destinationPath))
         {
-            // Collisions are the exception, so the lock only guards this slow path.
-            lock (_collisionLock)
-            {
-                string uniquePath = BuildUniquePath(destinationFolder, fileName);
-                File.Move(sourcePath, uniquePath);
-                return uniquePath;
-            }
+            return MoveToSuffixedPath(sourcePath, destinationFolder, fileName, destinationPath);
         }
     }
 
-    private static string BuildUniquePath(string folder, string fileName)
+    /// <summary>
+    /// Slow path for a destination name that is already taken. Re-running a date folder whose
+    /// archive was never cleared collides on every single file, so this path has to stay
+    /// parallel: the move itself is the collision check (<see cref="File.Move(string, string)"/>
+    /// fails rather than overwriting), which means no lock is needed, and the probe starts from
+    /// the highest suffix this run has already used for the same name instead of from 1.
+    /// </summary>
+    private string MoveToSuffixedPath(string sourcePath, string destinationFolder, string fileName, string takenPath)
     {
         string stem = Path.GetFileNameWithoutExtension(fileName);
         string extension = Path.GetExtension(fileName);
 
-        for (int suffix = 1; suffix < int.MaxValue; suffix++)
+        for (int suffix = _nextSuffix.GetValueOrDefault(takenPath, 1); suffix < int.MaxValue; suffix++)
         {
-            string candidate = Path.Combine(folder, $"{stem}_{suffix}{extension}");
-            if (!File.Exists(candidate))
+            string candidate = Path.Combine(destinationFolder, $"{stem}_{suffix}{extension}");
+
+            try
+            {
+                File.Move(sourcePath, candidate);
+                _nextSuffix[takenPath] = suffix + 1;
                 return candidate;
+            }
+            catch (IOException) when (File.Exists(candidate))
+            {
+                // Taken by an earlier run or by another worker; try the next suffix.
+            }
         }
 
-        throw new IOException($"Unable to find a free file name for {fileName} in {folder}.");
+        throw new IOException($"Unable to find a free file name for {fileName} in {destinationFolder}.");
+    }
+
+    /// <summary>
+    /// Whether this failure still gets a per-file <c>.error.log</c>. Every failure is always in
+    /// the error report CSV and in the run log; the per-file log is the convenience copy, and on
+    /// a run where a systemic problem fails millions of documents writing one file per failure
+    /// is what turns a slow run into a stalled one.
+    /// </summary>
+    private bool ShouldWriteErrorLog()
+    {
+        int limit = _config.Processing.MaxErrorLogFiles;
+        if (limit <= 0)
+            return true;
+
+        if (Interlocked.Increment(ref _errorLogsWritten) <= limit)
+            return true;
+
+        if (Interlocked.Increment(ref _errorLogsSuppressed) == 1)
+        {
+            _logger.LogWarning(
+                "MaxErrorLogFiles ({Limit:N0}) reached; further failures are recorded in the error report and " +
+                "the run log only, and the documents are still moved to the error folder.", limit);
+        }
+
+        return false;
     }
 }

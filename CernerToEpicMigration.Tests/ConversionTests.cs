@@ -122,6 +122,42 @@ public class ConversionTests
     }
 
     [Fact]
+    public void The_rtf_is_written_as_a_base64_envelope_when_the_feature_flag_is_on()
+    {
+        using TempWorkspace workspace = new();
+        workspace.Config.Processing.EncodeRtfOutputAsBase64 = true;
+
+        string input = Path.Combine(workspace.InputPath, "note.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "note.rtf");
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
+
+        ConversionOutcome outcome = workspace.CreateConverter().Convert(input, output);
+
+        byte[] written = File.ReadAllBytes(output);
+        Assert.Equal(written.Length, outcome.OutputBytes);
+
+        // What lands on disk is the envelope; the RTF is what comes out of it.
+        string rtf = Encoding.UTF8.GetString(Convert.FromBase64String(Encoding.ASCII.GetString(written)));
+        Assert.StartsWith("{\\rtf", rtf, StringComparison.Ordinal);
+        Assert.Contains("Progress Note", rtf, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_rtf_is_written_as_plain_rtf_when_the_feature_flag_is_off()
+    {
+        using TempWorkspace workspace = new();
+        Assert.False(workspace.Config.Processing.EncodeRtfOutputAsBase64);
+
+        string input = Path.Combine(workspace.InputPath, "note.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "note.rtf");
+        TempWorkspace.WriteInput(input, TempWorkspace.SampleXhtml);
+
+        workspace.CreateConverter().Convert(input, output);
+
+        Assert.StartsWith("{\\rtf", File.ReadAllText(output), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_reported_input_size_is_the_size_of_the_file_on_disk()
     {
         using TempWorkspace workspace = new();

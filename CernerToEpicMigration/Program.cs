@@ -148,6 +148,9 @@ public static class Program
         return config;
     }
 
+    /// <summary>Size cap per log file. Serilog rolls to a new file rather than stopping at it.</summary>
+    private const long LogFileSizeLimitBytes = 256L * 1024 * 1024;
+
     private static void ConfigureSerilog(MigrationConfig config)
     {
         Directory.CreateDirectory(Path.GetFullPath(config.LogBasePath));
@@ -157,6 +160,11 @@ public static class Program
             .WriteTo.File(
                 Path.Combine(Path.GetFullPath(config.LogBasePath), "migration_.log"),
                 rollingInterval: RollingInterval.Day,
+                // Serilog's default is a 1 GB cap with rolling off, which makes the log go
+                // silent mid-run instead of rolling. A bulk run that starts failing writes a
+                // stack trace per file, so the cap is reachable on a single day.
+                rollOnFileSizeLimit: true,
+                fileSizeLimitBytes: LogFileSizeLimitBytes,
                 retainedFileCountLimit: 30,
                 restrictedToMinimumLevel: LogEventLevel.Information,
                 outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
@@ -301,12 +309,14 @@ public static class Program
         Log.Information(
             "Input={Input} OutputRtf={Output} Reports={Reports} Pattern={Pattern} Threads={Threads} " +
             "BatchSize={BatchSize} MaxAttempts={MaxAttempts} RetryDelayMs={RetryDelay} Timeout={Timeout}s " +
-            "Archive={Archive} Overwrite={Overwrite} DateFolder={DateFolder} Resume={Resume} DryRun={DryRun}",
+            "Archive={Archive} Overwrite={Overwrite} Base64Output={Base64Output} " +
+            "DateFolder={DateFolder} Resume={Resume} DryRun={DryRun}",
             Path.GetFullPath(config.InputBasePath), Path.GetFullPath(config.OutputRtfBasePath),
             Path.GetFullPath(config.ReportBasePath), config.Processing.FileSearchPattern,
             config.Processing.EffectiveParallelism, config.Processing.BatchSize, config.Processing.MaxRetryCount,
             config.Processing.RetryDelayMs, config.Processing.ConversionTimeoutSeconds,
             config.Processing.ArchiveOnSuccess, config.Processing.OverwriteExistingRtf,
+            config.Processing.EncodeRtfOutputAsBase64,
             cli.DateFolder ?? "(all)", cli.Resume, cli.DryRun);
     }
 
@@ -325,6 +335,9 @@ public static class Program
         Console.WriteLine($"  Threads    : {config.Processing.EffectiveParallelism}" +
                           $"   Batch size: {config.Processing.BatchSize}" +
                           $"   Max attempts: {config.Processing.MaxRetryCount}");
+
+        if (config.Processing.EncodeRtfOutputAsBase64)
+            Console.WriteLine("  RTF format : Base64-encoded (.rtf files hold an envelope, not plain RTF)");
 
         if (cli.DateFolder is not null)
             Console.WriteLine($"  Date folder: {cli.DateFolder} (single folder run)");
