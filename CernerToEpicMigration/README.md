@@ -40,9 +40,9 @@ build and migration servers.
                           \error\                    failed originals + <name>.error.log
 {OutputRtfBasePath}\2026-08-01\patient_doc_001.rtf   converted output
 {ReportBasePath}\migration_report_{timestamp}.csv    summary + per-folder breakdown
-                \error_report_{timestamp}.csv        one row per failed document
+                \error_report_{timestamp}.csv        file path, category, and message per failure
                 \checkpoint.json                     written after every batch
-{LogBasePath}\migration_{yyyyMMdd}.log               Serilog, 30 files retained
+{LogBasePath}\migration_{yyyyMMdd}.log               Serilog, configurable file retention
 ```
 
 If no date sub-folders exist, the input base path itself is processed as a single folder and a
@@ -70,7 +70,7 @@ rather than a failed overnight run:
 dotnet test          # from the repository root (CernerToEpicMigration.sln)
 ```
 
-75 tests cover Base64 decoding, encoding detection, error classification, CLI parsing, configuration
+78 tests cover Base64 decoding, encoding detection, error classification, CLI parsing, configuration
 validation, archive/error file handling, CSV escaping, the run lock, pre-flight, and end-to-end
 pipeline runs (including retry-then-error, an undecodable envelope, checkpointing, resume and
 cancellation) against the real Telerik converter — so a licence problem fails the test run, not
@@ -125,6 +125,7 @@ renewed. Verified: the published `CernerToEpicMigration.exe` converts and report
 
 | Setting | Default | Notes |
 | --- | --- | --- |
+| `LogRetainedFileCountLimit` | `30` | Daily Serilog files retained under `LogBasePath` |
 | `Processing.MaxDegreeOfParallelism` | `0` | 0 = `Environment.ProcessorCount` |
 | `Processing.BatchSize` | `1000` | Progress granularity and checkpoint interval |
 | `Processing.MaxRetryCount` | `3` | Total attempts per file, not extra attempts |

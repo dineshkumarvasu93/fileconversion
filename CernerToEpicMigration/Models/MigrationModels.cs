@@ -24,7 +24,7 @@ public sealed record WorkItem(string FilePath, DateFolder Folder);
 
 /// <summary>A file that exhausted its attempts and was moved to the error folder.</summary>
 public sealed record FileFailure(
-    string FileName,
+    string FilePath,
     string DateFolder,
     ErrorCategory Category,
     string ErrorType,

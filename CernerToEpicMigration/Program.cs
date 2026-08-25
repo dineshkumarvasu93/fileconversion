@@ -157,7 +157,7 @@ public static class Program
             .WriteTo.File(
                 Path.Combine(Path.GetFullPath(config.LogBasePath), "migration_.log"),
                 rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 30,
+                retainedFileCountLimit: config.LogRetainedFileCountLimit,
                 restrictedToMinimumLevel: LogEventLevel.Information,
                 outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
             .CreateLogger();
@@ -350,7 +350,8 @@ public static class Program
         Console.WriteLine($"Retries           : {metrics.Retries:N0}");
         Console.WriteLine($"Elapsed           : {metrics.Elapsed:hh\\:mm\\:ss}");
         Console.WriteLine($"Throughput        : {metrics.FilesPerSecond:N1} files/s ({metrics.FilesPerSecond * 3600:N0} files/hour)");
-        Console.WriteLine($"Summary report    : {reportWriter.SummaryReportPath}");
+        if (reportWriter.HasSummaryReport)
+            Console.WriteLine($"Summary report    : {reportWriter.SummaryReportPath}");
 
         if (reportWriter.HasErrorReport)
             Console.WriteLine($"Error report      : {reportWriter.ErrorReportPath}");
