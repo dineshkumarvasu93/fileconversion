@@ -84,13 +84,26 @@ public sealed class TempWorkspace : IDisposable
 
     public ReportWriter CreateReportWriter() => new(Config);
 
-    public Stage1Pipeline CreatePipeline(ReportWriter reportWriter) => new(
+    public FileTraceWriter CreateTraceWriter(ReportWriter reportWriter) =>
+        new(Config, reportWriter.Timestamp);
+
+    /// <summary>
+    /// Builds the pipeline. <paramref name="converter"/> defaults to the real Telerik converter so
+    /// the end-to-end tests keep exercising it; the threading, retry and batching tests pass an
+    /// instrumented double instead, because those need failures on demand and a record of who ran
+    /// what - neither of which the real converter can give.
+    /// </summary>
+    public Stage1Pipeline CreatePipeline(
+        ReportWriter reportWriter,
+        IXhtmlToRtfConverter? converter = null,
+        FileTraceWriter? traceWriter = null) => new(
         Config,
         new FileDiscoveryService(Config, NullLogger<FileDiscoveryService>.Instance),
         CreateFileManager(),
-        CreateConverter(),
+        converter ?? CreateConverter(),
         Metrics,
         reportWriter,
+        traceWriter ?? CreateTraceWriter(reportWriter),
         new CheckpointService(Config, NullLogger<CheckpointService>.Instance),
         NullLogger<Stage1Pipeline>.Instance);
 

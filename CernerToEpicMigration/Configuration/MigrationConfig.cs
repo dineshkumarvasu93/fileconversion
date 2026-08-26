@@ -128,6 +128,15 @@ public sealed class ProcessingOptions
     /// </summary>
     public int MaxErrorLogFiles { get; set; }
 
+    /// <summary>
+    /// Write one row per document to <c>file_trace_{timestamp}.csv</c>: worker slot, thread,
+    /// start, end, duration, attempts and outcome. This is how a tuning run proves the configured
+    /// number of workers was actually busy. About 110
+    /// bytes a row, so a 50,000-file tuning run costs ~5 MB and a million-file production run
+    /// ~110 MB; leave it off for the bulk run unless the trace is wanted.
+    /// </summary>
+    public bool EnableFileTrace { get; set; }
+
     /// <summary>Effective worker count after resolving the auto-detect value.</summary>
     public int EffectiveParallelism =>
         MaxDegreeOfParallelism > 0 ? MaxDegreeOfParallelism : Environment.ProcessorCount;

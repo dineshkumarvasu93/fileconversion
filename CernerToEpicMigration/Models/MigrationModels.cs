@@ -33,6 +33,22 @@ public sealed record FileFailure(
     DateTimeOffset TimestampUtc,
     string? StackTrace);
 
+/// <summary>
+/// One row of the per-file trace: which worker handled which document, and for how long.
+/// <paramref name="Duration"/> is measured with a stopwatch rather than by subtracting two wall
+/// clock readings, so it stays honest across a clock adjustment mid-run; the end of the interval
+/// is <paramref name="StartUtc"/> plus <paramref name="Duration"/>.
+/// </summary>
+public readonly record struct FileTrace(
+    int WorkerSlot,
+    int ThreadId,
+    string DateFolder,
+    string FileName,
+    DateTimeOffset StartUtc,
+    TimeSpan Duration,
+    int Attempts,
+    string Outcome);
+
 /// <summary>Per-date-folder totals used by the dashboard and the summary report.</summary>
 public sealed class FolderStatistics
 {

@@ -34,6 +34,12 @@ public sealed class ReportWriter : IDisposable
         _timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Run stamp shared by every file this run produces, so the summary, the error report and the
+    /// file trace can be matched up by name.
+    /// </summary>
+    public string Timestamp => _timestamp;
+
     public string SummaryReportPath =>
         Path.Combine(Path.GetFullPath(_config.ReportBasePath), $"migration_report_{_timestamp}.csv");
 
@@ -115,6 +121,14 @@ public sealed class ReportWriter : IDisposable
         report.AppendLine($"Input Path,{Escape(Path.GetFullPath(_config.InputBasePath))}");
         report.AppendLine($"Output Path,{Escape(Path.GetFullPath(_config.OutputRtfBasePath))}");
         report.AppendLine($"Threads,{_config.Processing.EffectiveParallelism}");
+        // Configured vs observed. Peak must never exceed Threads and should reach it; the average
+        // is what says whether those workers stayed busy or spent the run waiting. See
+        // MetricsCollector.AverageConcurrency.
+        report.AppendLine($"Peak Concurrent Workers,{metrics.PeakActiveWorkers}");
+        report.AppendLine(
+            $"Average Concurrent Workers,{metrics.AverageConcurrency.ToString("F2", CultureInfo.InvariantCulture)}");
+        report.AppendLine(
+            $"Worker Utilisation (%),{WorkerUtilisation(metrics).ToString("F1", CultureInfo.InvariantCulture)}");
         report.AppendLine($"Batch Size,{_config.Processing.BatchSize}");
         report.AppendLine($"Total Files Found,{metrics.TotalFound}");
         report.AppendLine($"Total Files Processed,{processed}");
@@ -148,6 +162,17 @@ public sealed class ReportWriter : IDisposable
 
     private static double AverageFileSizeMb(long totalBytes, long fileCount) =>
         fileCount == 0 ? 0 : totalBytes / (1024d * 1024d) / fileCount;
+
+    /// <summary>
+    /// Average concurrency as a percentage of the workers that were asked for. 100% means every
+    /// configured worker was occupied for the whole run; a low figure means the parallelism
+    /// setting is not buying what it claims to.
+    /// </summary>
+    private double WorkerUtilisation(MetricsCollector metrics)
+    {
+        int configured = _config.Processing.EffectiveParallelism;
+        return configured <= 0 ? 0 : Math.Min(100d, metrics.AverageConcurrency / configured * 100d);
+    }
 
     private static string Escape(string? value)
     {

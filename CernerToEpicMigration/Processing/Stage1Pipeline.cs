@@ -23,6 +23,7 @@ public sealed class Stage1Pipeline
     private readonly IXhtmlToRtfConverter _converter;
     private readonly MetricsCollector _metrics;
     private readonly ReportWriter _reportWriter;
+    private readonly FileTraceWriter _traceWriter;
     private readonly CheckpointService _checkpointService;
     private readonly ILogger<Stage1Pipeline> _logger;
 
@@ -36,6 +37,7 @@ public sealed class Stage1Pipeline
         IXhtmlToRtfConverter converter,
         MetricsCollector metrics,
         ReportWriter reportWriter,
+        FileTraceWriter traceWriter,
         CheckpointService checkpointService,
         ILogger<Stage1Pipeline> logger)
     {
@@ -45,6 +47,7 @@ public sealed class Stage1Pipeline
         _converter = converter;
         _metrics = metrics;
         _reportWriter = reportWriter;
+        _traceWriter = traceWriter;
         _checkpointService = checkpointService;
         _logger = logger;
     }
@@ -258,6 +261,7 @@ public sealed class Stage1Pipeline
             // A batch boundary is where the run becomes durable, so the error report is brought
             // up to date with the checkpoint rather than being left in the write buffer.
             _reportWriter.Flush();
+            _traceWriter.Flush();
 
             checkpoint.LastProcessedFolder = folder.Name;
             checkpoint.LastProcessedFile = Path.GetFileName(batch[^1]);
@@ -323,13 +327,21 @@ public sealed class Stage1Pipeline
     /// </summary>
     private async ValueTask ProcessFileAsync(WorkItem item, CancellationToken cancellationToken)
     {
-        _metrics.WorkerStarted();
+        // The slot is this worker's identity for as long as it holds this document. The managed
+        // thread id is recorded too, but it is not the identity: the continuation after the retry
+        // delay below can come back on a different pool thread.
+        int slot = _metrics.WorkerStarted();
+        int threadId = Environment.CurrentManagedThreadId;
+        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
+        long startTicks = Stopwatch.GetTimestamp();
+
+        string outcomeLabel = "Cancelled";
+        int attempts = 0;
 
         try
         {
             Exception? lastError = null;
             ErrorCategory category = ErrorCategory.Permanent;
-            int attempts = 0;
 
             while (attempts < _config.Processing.MaxRetryCount)
             {
@@ -342,6 +354,7 @@ public sealed class Stage1Pipeline
                     _fileManager.ArchiveSuccess(item);
                     _metrics.RecordSuccess(item.Folder.Name, outcome.InputBytes, outcome.OutputBytes);
 
+                    outcomeLabel = "Succeeded";
                     _logger.LogDebug(
                         "Converted {File} ({InputBytes} bytes) to {Output} ({OutputBytes} bytes) on attempt {Attempt}.",
                         item.FilePath, outcome.InputBytes, outputPath, outcome.OutputBytes, attempts);
@@ -358,6 +371,7 @@ public sealed class Stage1Pipeline
 
                     if (category == ErrorCategory.Fatal)
                     {
+                        outcomeLabel = "Fatal";
                         RaiseFatal(item, exception);
                         return;
                     }
@@ -376,11 +390,26 @@ public sealed class Stage1Pipeline
                 }
             }
 
+            outcomeLabel = $"Failed:{category}";
             FailFile(item, lastError!, category, attempts);
         }
         finally
         {
-            _metrics.WorkerFinished();
+            TimeSpan held = Stopwatch.GetElapsedTime(startTicks);
+            _metrics.WorkerFinished(slot, held);
+
+            // Recorded on every path, including the cancelled one - a trace that silently drops
+            // the files that were in flight when the run stopped would understate concurrency at
+            // exactly the moment it matters.
+            _traceWriter.Record(new FileTrace(
+                WorkerSlot: slot,
+                ThreadId: threadId,
+                DateFolder: item.Folder.Name,
+                FileName: Path.GetFileName(item.FilePath),
+                StartUtc: startedAt,
+                Duration: held,
+                Attempts: attempts,
+                Outcome: outcomeLabel));
         }
     }
 

@@ -1,4 +1,4 @@
-using CernerToEpicMigration.Cli;
+﻿using CernerToEpicMigration.Cli;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;
@@ -192,6 +192,9 @@ public static class Program
         services.AddSingleton<MetricsCollector>();
         services.AddSingleton<ConsoleDashboard>();
         services.AddSingleton<ReportWriter>();
+        // Shares the report timestamp so the trace file lines up by name with the run that wrote it.
+        services.AddSingleton(provider => new FileTraceWriter(
+            config, provider.GetRequiredService<ReportWriter>().Timestamp));
         services.AddSingleton<CheckpointService>();
         services.AddSingleton<Stage1Pipeline>();
 
@@ -231,6 +234,7 @@ public static class Program
         MetricsCollector metrics = services.GetRequiredService<MetricsCollector>();
         ConsoleDashboard dashboard = services.GetRequiredService<ConsoleDashboard>();
         ReportWriter reportWriter = services.GetRequiredService<ReportWriter>();
+        FileTraceWriter traceWriter = services.GetRequiredService<FileTraceWriter>();
 
         using CancellationTokenSource shutdownCts = new();
 
@@ -279,12 +283,24 @@ public static class Program
 
         reportWriter.WriteSummary(metrics, status);
         reportWriter.Dispose();
+        traceWriter.Dispose();
 
         Log.Information(
             "Stage 1 {Status}: {Succeeded:N0} succeeded, {Failed:N0} failed, {Retries:N0} retr(y/ies), elapsed {Elapsed:hh\\:mm\\:ss}.",
             status, metrics.Succeeded, metrics.Failed, metrics.Retries, metrics.Elapsed);
 
-        PrintFinalSummary(config, metrics, reportWriter, status, result);
+        // Configured vs observed, in the run log as well as the summary CSV, because this is the
+        // line that says whether the parallelism setting did anything.
+        Log.Information(
+            "Workers: {Configured} configured, {Peak} peak concurrent, {Average:F2} average ({Utilisation:F0}% occupied).",
+            config.Processing.EffectiveParallelism,
+            metrics.PeakActiveWorkers,
+            metrics.AverageConcurrency,
+            config.Processing.EffectiveParallelism <= 0
+                ? 0
+                : metrics.AverageConcurrency / config.Processing.EffectiveParallelism * 100d);
+
+        PrintFinalSummary(config, metrics, reportWriter, traceWriter, status, result);
 
         if (result.FatalError is not null)
             return ExitCodes.Fatal;
@@ -352,6 +368,7 @@ public static class Program
         MigrationConfig config,
         MetricsCollector metrics,
         ReportWriter reportWriter,
+        FileTraceWriter traceWriter,
         string status,
         Stage1Result result)
     {
@@ -363,10 +380,16 @@ public static class Program
         Console.WriteLine($"Retries           : {metrics.Retries:N0}");
         Console.WriteLine($"Elapsed           : {metrics.Elapsed:hh\\:mm\\:ss}");
         Console.WriteLine($"Throughput        : {metrics.FilesPerSecond:N1} files/s ({metrics.FilesPerSecond * 3600:N0} files/hour)");
+        Console.WriteLine(
+            $"Workers           : {config.Processing.EffectiveParallelism} configured, " +
+            $"{metrics.PeakActiveWorkers} peak, {metrics.AverageConcurrency:N2} average");
         Console.WriteLine($"Summary report    : {reportWriter.SummaryReportPath}");
 
         if (reportWriter.HasErrorReport)
             Console.WriteLine($"Error report      : {reportWriter.ErrorReportPath}");
+
+        if (traceWriter.HasTrace)
+            Console.WriteLine($"File trace        : {traceWriter.TracePath}");
 
         if (metrics.Failed > 0)
             Console.WriteLine($"Failed documents  : {Path.GetFullPath(config.InputBasePath)}\\<date>\\{FileManager.ErrorFolderName}");

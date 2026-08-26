@@ -14,15 +14,26 @@ public sealed class MetricsCollector
     private readonly ConcurrentDictionary<string, FolderStatistics> _folders = new();
     private readonly Process _process = Process.GetCurrentProcess();
 
+    /// <summary>
+    /// Recycled worker-slot ids. A slot is held for the whole of one file, so it survives the
+    /// <c>await</c> in the retry path; a managed thread id does not, because the thread pool is
+    /// free to resume the continuation somewhere else. That makes a slot the only worker identity
+    /// worth putting in a trace.
+    /// </summary>
+    private readonly ConcurrentBag<int> _freeSlots = new();
+
     private long _totalFound;
     private long _succeeded;
     private long _failed;
     private long _retries;
     private long _bytesRead;
     private long _bytesWritten;
+    private long _workerTicks;
     private int _currentBatch;
     private int _totalBatches;
     private int _errorsInCurrentBatch;
+    private int _peakActiveWorkers;
+    private int _slotsHandedOut;
     private volatile int _activeWorkers;
     private volatile string _currentFolder = "-";
 
@@ -58,6 +69,29 @@ public sealed class MetricsCollector
     public int TotalBatches => _totalBatches;
 
     public int ActiveWorkers => _activeWorkers;
+
+    /// <summary>
+    /// The most workers that were ever in flight at once. This is the check on
+    /// <c>MaxDegreeOfParallelism</c>: it must never exceed the configured value, and on a run of
+    /// any size it should reach it - a peak of 1 means something serialised the run.
+    /// </summary>
+    public int PeakActiveWorkers => Volatile.Read(ref _peakActiveWorkers);
+
+    /// <summary>
+    /// Worker-time divided by wall-clock time: how many workers were busy on average across the
+    /// run. <see cref="PeakActiveWorkers"/> only proves the configured number of workers
+    /// overlapped once; this proves they stayed occupied. Well short of the configured
+    /// parallelism means the workers are starved - blocked on I/O, or idling at a batch boundary
+    /// while one straggler finishes.
+    /// </summary>
+    public double AverageConcurrency
+    {
+        get
+        {
+            long elapsedTicks = _stopwatch.Elapsed.Ticks;
+            return elapsedTicks <= 0 ? 0 : (double)Interlocked.Read(ref _workerTicks) / elapsedTicks;
+        }
+    }
 
     public int ErrorsInCurrentBatch => _errorsInCurrentBatch;
 
@@ -132,9 +166,46 @@ public sealed class MetricsCollector
         Interlocked.Exchange(ref _errorsInCurrentBatch, 0);
     }
 
-    public void WorkerStarted() => Interlocked.Increment(ref _activeWorkers);
+    /// <summary>
+    /// Claims a worker slot for one file and returns its 1-based id. Slots are recycled, so the
+    /// ids stay in a small range around the peak concurrency rather than climbing with the file
+    /// count. Pair every call with <see cref="WorkerFinished"/>.
+    /// </summary>
+    public int WorkerStarted()
+    {
+        RecordPeak(Interlocked.Increment(ref _activeWorkers));
 
-    public void WorkerFinished() => Interlocked.Decrement(ref _activeWorkers);
+        return _freeSlots.TryTake(out int slot) ? slot : Interlocked.Increment(ref _slotsHandedOut);
+    }
+
+    /// <summary>
+    /// Releases a worker slot and adds the time it was held to the worker-time total behind
+    /// <see cref="AverageConcurrency"/>. The retry backoff counts as held time on purpose: a
+    /// sleeping worker is one that cannot take the next file, which is exactly what the
+    /// occupancy figure is meant to show.
+    /// </summary>
+    public void WorkerFinished(int slot, TimeSpan held)
+    {
+        // Returned before the count drops so the next worker reuses this slot rather than
+        // minting a new one.
+        _freeSlots.Add(slot);
+        Interlocked.Add(ref _workerTicks, held.Ticks);
+        Interlocked.Decrement(ref _activeWorkers);
+    }
+
+    private void RecordPeak(int active)
+    {
+        int peak = Volatile.Read(ref _peakActiveWorkers);
+
+        while (active > peak)
+        {
+            int seen = Interlocked.CompareExchange(ref _peakActiveWorkers, active, peak);
+            if (seen == peak)
+                return;
+
+            peak = seen;
+        }
+    }
 
     public void RecordRetry() => Interlocked.Increment(ref _retries);
 
