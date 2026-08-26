@@ -1,9 +1,10 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;
+using Microsoft.Extensions.Logging;
 
 namespace CernerToEpicMigration.Reporting;
 
@@ -21,6 +22,7 @@ public sealed class ReportWriter : IDisposable
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(2);
 
     private readonly MigrationConfig _config;
+    private readonly ILogger<ReportWriter> _logger;
     private readonly string _timestamp;
     private readonly object _errorLock = new();
     private readonly Stopwatch _sinceLastFlush = new();
@@ -28,9 +30,10 @@ public sealed class ReportWriter : IDisposable
     private StreamWriter? _errorWriter;
     private int _rowsSinceLastFlush;
 
-    public ReportWriter(MigrationConfig config)
+    public ReportWriter(MigrationConfig config, ILogger<ReportWriter> logger)
     {
         _config = config;
+        _logger = logger;
         _timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
     }
 
@@ -49,39 +52,45 @@ public sealed class ReportWriter : IDisposable
     /// <summary>True once at least one failure row has been written.</summary>
     public bool HasErrorReport { get; private set; }
 
+    /// <summary>True once the end-of-run summary has been written to disk.</summary>
+    public bool HasSummaryReport { get; private set; }
+
     /// <summary>Appends one row to the error report. Safe to call from worker threads.</summary>
     public void RecordFailure(FileFailure failure)
     {
         lock (_errorLock)
         {
-            if (_errorWriter is null)
+            try
             {
-                Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
+                if (_errorWriter is null)
+                {
+                    Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
 
-                // FileShare.ReadWrite so an operator can open or tail the error report while a
-                // multi-hour run is still going.
-                FileStream stream = new(ErrorReportPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-                _errorWriter = new StreamWriter(stream, Encoding.UTF8);
-                _errorWriter.WriteLine("File Name,Date Folder,Error Category,Error Type,Error Message,Retry Count,Timestamp");
-                _sinceLastFlush.Start();
+                    // FileShare.ReadWrite so an operator can open or tail the error report while a
+                    // multi-hour run is still going.
+                    FileStream stream = new(ErrorReportPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+                    _errorWriter = new StreamWriter(stream, Encoding.UTF8);
+                    _errorWriter.WriteLine("File Path,Error Category,Error Message");
+                    _sinceLastFlush.Start();
+                }
+
+                _errorWriter.WriteLine(string.Join(',',
+                    Escape(failure.FilePath),
+                    Escape(failure.Category.ToString()),
+                    Escape(failure.ErrorMessage)));
                 HasErrorReport = true;
+
+                // Flushing every row makes the error path a disk round-trip per failure, and every
+                // worker queues behind this lock to take it. Batching keeps a tailed report at most
+                // FlushInterval behind while a run where a systemic fault fails millions of
+                // documents no longer stalls on the reporting.
+                if (++_rowsSinceLastFlush >= FlushRowThreshold || _sinceLastFlush.Elapsed >= FlushInterval)
+                    FlushCore();
             }
-
-            _errorWriter.WriteLine(string.Join(',',
-                Escape(failure.FileName),
-                Escape(failure.DateFolder),
-                Escape(failure.Category.ToString()),
-                Escape(failure.ErrorType),
-                Escape(failure.ErrorMessage),
-                failure.Attempts.ToString(CultureInfo.InvariantCulture),
-                failure.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)));
-
-            // Flushing every row makes the error path a disk round-trip per failure, and every
-            // worker queues behind this lock to take it. Batching keeps a tailed report at most
-            // FlushInterval behind while a run where a systemic fault fails millions of
-            // documents no longer stalls on the reporting.
-            if (++_rowsSinceLastFlush >= FlushRowThreshold || _sinceLastFlush.Elapsed >= FlushInterval)
-                FlushCore();
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "The failure of {File} could not be added to the error report.", failure.FilePath);
+            }
         }
     }
 
@@ -108,56 +117,64 @@ public sealed class ReportWriter : IDisposable
     /// <summary>Writes the end-of-run summary CSV, including the per-folder breakdown.</summary>
     public void WriteSummary(MetricsCollector metrics, string status)
     {
-        Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
-
-        double filesPerSecond = metrics.FilesPerSecond;
-        long totalBytes = metrics.BytesRead;
-        long processed = metrics.Processed;
-
-        StringBuilder report = new();
-        report.AppendLine($"Report Generated,{DateTimeOffset.UtcNow:yyyy-MM-ddTHH:mm:ssZ}");
-        report.AppendLine($"Stage,1 (XHTML to RTF)");
-        report.AppendLine($"Status,{Escape(status)}");
-        report.AppendLine($"Input Path,{Escape(Path.GetFullPath(_config.InputBasePath))}");
-        report.AppendLine($"Output Path,{Escape(Path.GetFullPath(_config.OutputRtfBasePath))}");
-        report.AppendLine($"Threads,{_config.Processing.EffectiveParallelism}");
-        // Configured vs observed. Peak must never exceed Threads and should reach it; the average
-        // is what says whether those workers stayed busy or spent the run waiting. See
-        // MetricsCollector.AverageConcurrency.
-        report.AppendLine($"Peak Concurrent Workers,{metrics.PeakActiveWorkers}");
-        report.AppendLine(
-            $"Average Concurrent Workers,{metrics.AverageConcurrency.ToString("F2", CultureInfo.InvariantCulture)}");
-        report.AppendLine(
-            $"Worker Utilisation (%),{WorkerUtilisation(metrics).ToString("F1", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Batch Size,{_config.Processing.BatchSize}");
-        report.AppendLine($"Total Files Found,{metrics.TotalFound}");
-        report.AppendLine($"Total Files Processed,{processed}");
-        report.AppendLine($"Total Files Succeeded,{metrics.Succeeded}");
-        report.AppendLine($"Total Files Failed,{metrics.Failed}");
-        report.AppendLine($"Total Retries,{metrics.Retries}");
-        report.AppendLine($"Total Processing Time,{metrics.Elapsed:hh\\:mm\\:ss}");
-        // Plain numbers, no thousands separators: these rows are read by spreadsheets and scripts.
-        report.AppendLine($"Average Files Per Second,{filesPerSecond.ToString("F2", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Average Files Per Minute,{(filesPerSecond * 60).ToString("F0", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Average Files Per Hour,{(filesPerSecond * 3600).ToString("F0", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Average File Size (MB),{AverageFileSizeMb(totalBytes, metrics.Succeeded).ToString("F2", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Total XHTML Read (GB),{(totalBytes / (1024d * 1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture)}");
-        report.AppendLine($"Total RTF Written (GB),{(metrics.BytesWritten / (1024d * 1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture)}");
-        report.AppendLine();
-        report.AppendLine("--- Per-Folder Breakdown ---");
-        report.AppendLine("Date Folder,Total Files,Succeeded,Failed,Processing Time");
-
-        foreach (FolderStatistics folder in metrics.GetFolderStatistics())
+        try
         {
-            report.AppendLine(string.Join(',',
-                Escape(folder.Name),
-                folder.TotalFiles.ToString(CultureInfo.InvariantCulture),
-                folder.Succeeded.ToString(CultureInfo.InvariantCulture),
-                folder.Failed.ToString(CultureInfo.InvariantCulture),
-                $"{folder.Elapsed:hh\\:mm\\:ss}"));
-        }
+            Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
 
-        File.WriteAllText(SummaryReportPath, report.ToString(), Encoding.UTF8);
+            double filesPerSecond = metrics.FilesPerSecond;
+            long totalBytes = metrics.BytesRead;
+            long processed = metrics.Processed;
+
+            StringBuilder report = new();
+            report.AppendLine($"Report Generated,{DateTimeOffset.UtcNow:yyyy-MM-ddTHH:mm:ssZ}");
+            report.AppendLine($"Stage,1 (XHTML to RTF)");
+            report.AppendLine($"Status,{Escape(status)}");
+            report.AppendLine($"Input Path,{Escape(Path.GetFullPath(_config.InputBasePath))}");
+            report.AppendLine($"Output Path,{Escape(Path.GetFullPath(_config.OutputRtfBasePath))}");
+            report.AppendLine($"Threads,{_config.Processing.EffectiveParallelism}");
+            // Configured vs observed. Peak must never exceed Threads and should reach it; the average
+            // is what says whether those workers stayed busy or spent the run waiting. See
+            // MetricsCollector.AverageConcurrency.
+            report.AppendLine($"Peak Concurrent Workers,{metrics.PeakActiveWorkers}");
+            report.AppendLine(
+                $"Average Concurrent Workers,{metrics.AverageConcurrency.ToString("F2", CultureInfo.InvariantCulture)}");
+            report.AppendLine(
+                $"Worker Utilisation (%),{WorkerUtilisation(metrics).ToString("F1", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Batch Size,{_config.Processing.BatchSize}");
+            report.AppendLine($"Total Files Found,{metrics.TotalFound}");
+            report.AppendLine($"Total Files Processed,{processed}");
+            report.AppendLine($"Total Files Succeeded,{metrics.Succeeded}");
+            report.AppendLine($"Total Files Failed,{metrics.Failed}");
+            report.AppendLine($"Total Retries,{metrics.Retries}");
+            report.AppendLine($"Total Processing Time,{metrics.Elapsed:hh\\:mm\\:ss}");
+            // Plain numbers, no thousands separators: these rows are read by spreadsheets and scripts.
+            report.AppendLine($"Average Files Per Second,{filesPerSecond.ToString("F2", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Average Files Per Minute,{(filesPerSecond * 60).ToString("F0", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Average Files Per Hour,{(filesPerSecond * 3600).ToString("F0", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Average File Size (MB),{AverageFileSizeMb(totalBytes, metrics.Succeeded).ToString("F2", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Total XHTML Read (GB),{(totalBytes / (1024d * 1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture)}");
+            report.AppendLine($"Total RTF Written (GB),{(metrics.BytesWritten / (1024d * 1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture)}");
+            report.AppendLine();
+            report.AppendLine("--- Per-Folder Breakdown ---");
+            report.AppendLine("Date Folder,Total Files,Succeeded,Failed,Processing Time");
+
+            foreach (FolderStatistics folder in metrics.GetFolderStatistics())
+            {
+                report.AppendLine(string.Join(',',
+                    Escape(folder.Name),
+                    folder.TotalFiles.ToString(CultureInfo.InvariantCulture),
+                    folder.Succeeded.ToString(CultureInfo.InvariantCulture),
+                    folder.Failed.ToString(CultureInfo.InvariantCulture),
+                    $"{folder.Elapsed:hh\\:mm\\:ss}"));
+            }
+
+            File.WriteAllText(SummaryReportPath, report.ToString(), Encoding.UTF8);
+            HasSummaryReport = true;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "The migration summary report could not be written under {Path}.", _config.ReportBasePath);
+        }
     }
 
     private static double AverageFileSizeMb(long totalBytes, long fileCount) =>
@@ -179,10 +196,9 @@ public sealed class ReportWriter : IDisposable
         if (string.IsNullOrEmpty(value))
             return string.Empty;
 
-        string sanitised = value.Replace("\r", " ").Replace("\n", " ");
-        return sanitised.Contains(',') || sanitised.Contains('"')
-            ? $"\"{sanitised.Replace("\"", "\"\"")}\""
-            : sanitised;
+        return value.Contains(',') || value.Contains('"') || value.Contains('\r') || value.Contains('\n')
+            ? $"\"{value.Replace("\"", "\"\"")}\""
+            : value;
     }
 
     public void Dispose()
