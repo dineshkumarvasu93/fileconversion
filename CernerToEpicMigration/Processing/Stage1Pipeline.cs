@@ -416,7 +416,7 @@ public sealed class Stage1Pipeline
     private void FailFile(WorkItem item, Exception exception, ErrorCategory category, int attempts)
     {
         FileFailure failure = new(
-            FileName: Path.GetFileName(item.FilePath),
+            FilePath: Path.GetFullPath(item.FilePath),
             DateFolder: item.Folder.Name,
             Category: category,
             ErrorType: exception.GetType().Name,

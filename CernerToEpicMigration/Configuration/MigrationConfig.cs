@@ -22,6 +22,8 @@ public sealed class MigrationConfig
     /// <summary>Folder for the rolling Serilog log files.</summary>
     public string LogBasePath { get; set; } = string.Empty;
 
+    public int LogRetainedFileCountLimit { get; set; } = 30;
+
     public ProcessingOptions Processing { get; set; } = new();
 
     public DashboardOptions Dashboard { get; set; } = new();
@@ -47,6 +49,9 @@ public sealed class MigrationConfig
 
         if (string.IsNullOrWhiteSpace(LogBasePath))
             errors.Add("LogBasePath is not configured.");
+
+        if (LogRetainedFileCountLimit <= 0)
+            errors.Add("LogRetainedFileCountLimit must be greater than zero.");
 
         if (Processing.BatchSize <= 0)
             errors.Add("Processing.BatchSize must be greater than zero.");

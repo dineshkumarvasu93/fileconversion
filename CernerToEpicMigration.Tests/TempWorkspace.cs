@@ -82,7 +82,7 @@ public sealed class TempWorkspace : IDisposable
 
     public TelerikXhtmlToRtfConverter CreateConverter() => new(Config.Processing);
 
-    public ReportWriter CreateReportWriter() => new(Config);
+    public ReportWriter CreateReportWriter() => new(Config, NullLogger<ReportWriter>.Instance);
 
     public FileTraceWriter CreateTraceWriter(ReportWriter reportWriter) =>
         new(Config, reportWriter.Timestamp);

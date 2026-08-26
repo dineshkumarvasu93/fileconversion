@@ -67,7 +67,9 @@ public class Stage1PipelineTests
         Assert.Equal(0, workspace.Metrics.Succeeded);
         Assert.Equal(2, workspace.ErrorFiles("2026-08-01").Length); // the document and its .error.log
         Assert.True(File.Exists(reportWriter.ErrorReportPath));
-        Assert.Contains("doc_1.xhtml", TempWorkspace.ReadShared(reportWriter.ErrorReportPath), StringComparison.Ordinal);
+        string errorReport = TempWorkspace.ReadShared(reportWriter.ErrorReportPath);
+        Assert.Contains("File Path,Error Category,Error Message", errorReport, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(folder.Path, "doc_1.xhtml"), errorReport, StringComparison.Ordinal);
     }
 
     [Fact]

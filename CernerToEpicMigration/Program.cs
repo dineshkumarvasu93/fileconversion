@@ -1,4 +1,4 @@
-﻿using CernerToEpicMigration.Cli;
+using CernerToEpicMigration.Cli;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;

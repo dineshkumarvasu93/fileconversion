@@ -8,7 +8,7 @@ namespace CernerToEpicMigration.Tests;
 public class FileManagerTests
 {
     private static FileFailure Failure(string fileName) => new(
-        FileName: fileName,
+        FilePath: fileName,
         DateFolder: "2026-08-01",
         Category: ErrorCategory.Permanent,
         ErrorType: "XmlException",
