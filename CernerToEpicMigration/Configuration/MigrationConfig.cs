@@ -24,6 +24,20 @@ public sealed class MigrationConfig
 
     public int LogRetainedFileCountLimit { get; set; } = 30;
 
+    /// <summary>
+    /// Size at which the run log rolls to the next file. A bulk run that starts failing writes a
+    /// stack trace per document, so this is reached in hours, not days - and a log file larger
+    /// than this is one an operator cannot open on the migration server.
+    /// </summary>
+    public int LogFileSizeLimitMb { get; set; } = 256;
+
+    /// <summary>
+    /// Write failures to a second, warnings-and-above log alongside the full run log. The full
+    /// log is where the run is reconstructed; this one is where the failures are read, without
+    /// grepping gigabytes of progress lines to find them.
+    /// </summary>
+    public bool EnableSeparateErrorLog { get; set; } = true;
+
     public ProcessingOptions Processing { get; set; } = new();
 
     public DashboardOptions Dashboard { get; set; } = new();
@@ -52,6 +66,12 @@ public sealed class MigrationConfig
 
         if (LogRetainedFileCountLimit <= 0)
             errors.Add("LogRetainedFileCountLimit must be greater than zero.");
+
+        if (LogFileSizeLimitMb <= 0)
+            errors.Add("LogFileSizeLimitMb must be greater than zero.");
+
+        if (Processing.MaxReportRowsPerFile < 0)
+            errors.Add("Processing.MaxReportRowsPerFile cannot be negative (0 = one unsplit file).");
 
         if (Processing.BatchSize <= 0)
             errors.Add("Processing.BatchSize must be greater than zero.");
@@ -141,6 +161,43 @@ public sealed class ProcessingOptions
     /// ~110 MB; leave it off for the bulk run unless the trace is wanted.
     /// </summary>
     public bool EnableFileTrace { get; set; }
+
+    /// <summary>
+    /// Rows per part file in the error report and the file trace; 0 writes one unsplit file.
+    /// </summary>
+    /// <remarks>
+    /// A run over millions of documents can produce millions of report rows. One CSV of that size
+    /// will not open in a spreadsheet and is slow to search, so the reports roll to
+    /// <c>{name}_002.csv</c> and on at this row count - each part stays openable, and two people
+    /// can review different parts at the same time. 250,000 rows is roughly a 40 MB error part
+    /// and a 28 MB trace part.
+    /// </remarks>
+    public int MaxReportRowsPerFile { get; set; } = 250_000;
+
+    /// <summary>
+    /// Move files that <see cref="FileSearchPattern"/> does not match into the error folder
+    /// instead of ignoring them.
+    /// </summary>
+    /// <remarks>
+    /// Off, a <c>.pdf</c> or a mistyped <c>.xhtm</c> in a date folder is invisible: never counted,
+    /// never converted, never reported, and the folder still signs off as complete. On, it is
+    /// quarantined with a reason and appears in the error report like any other failure. Turn it
+    /// off only where another process legitimately keeps its own files in the input folders - a
+    /// file still being written by the extract cannot be moved, and would be reported as a
+    /// failure that could not be quarantined.
+    /// </remarks>
+    public bool QuarantineUnmatchedFiles { get; set; } = true;
+
+    /// <summary>
+    /// Reject a decoded payload that holds no XHTML, instead of handing it to the converter.
+    /// </summary>
+    /// <remarks>
+    /// Telerik's HTML importer never rejects anything - an empty file and a run of binary noise
+    /// both import and export a valid but meaningless RTF, which counts as a success everywhere.
+    /// This is the only gate on document content; see <c>XhtmlContentValidator</c> for how
+    /// deliberately narrow it is.
+    /// </remarks>
+    public bool ValidateXhtmlContent { get; set; } = true;
 
     /// <summary>Effective worker count after resolving the auto-detect value.</summary>
     public int EffectiveParallelism =>

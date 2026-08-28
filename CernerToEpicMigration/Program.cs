@@ -148,27 +148,57 @@ public static class Program
         return config;
     }
 
-    /// <summary>Size cap per log file. Serilog rolls to a new file rather than stopping at it.</summary>
-    private const long LogFileSizeLimitBytes = 256L * 1024 * 1024;
+    private const string LogOutputTemplate =
+        "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}";
 
+    /// <summary>
+    /// Two sinks over the same events, split by level.
+    /// </summary>
+    /// <remarks>
+    /// The run log is written per day and rolled again at
+    /// <see cref="MigrationConfig.LogFileSizeLimitMb"/>, so the files stay a size an operator can
+    /// actually open: Serilog's own default is a 1 GB cap with rolling off, which makes the log go
+    /// silent mid-run rather than rolling, and a bulk run that starts failing writes a stack trace
+    /// per document and reaches that in a single day.
+    /// <para>
+    /// The second sink is the point of this method. Reviewing failures in the full log means
+    /// finding a few thousand warnings among millions of progress lines; <c>errors_{date}.log</c>
+    /// holds warnings and above only, so it is small enough to read end to end and pairs with the
+    /// error report - the report says which documents failed, this says what the run was doing
+    /// around them.
+    /// </para>
+    /// </remarks>
     private static void ConfigureSerilog(MigrationConfig config)
     {
-        Directory.CreateDirectory(Path.GetFullPath(config.LogBasePath));
+        string logFolder = Path.GetFullPath(config.LogBasePath);
+        Directory.CreateDirectory(logFolder);
 
-        Log.Logger = new LoggerConfiguration()
+        long sizeLimitBytes = config.LogFileSizeLimitMb * 1024L * 1024L;
+
+        LoggerConfiguration logger = new LoggerConfiguration()
             .MinimumLevel.Information()
             .WriteTo.File(
-                Path.Combine(Path.GetFullPath(config.LogBasePath), "migration_.log"),
+                Path.Combine(logFolder, "migration_.log"),
                 rollingInterval: RollingInterval.Day,
-                // Serilog's default is a 1 GB cap with rolling off, which makes the log go
-                // silent mid-run instead of rolling. A bulk run that starts failing writes a
-                // stack trace per file, so the cap is reachable on a single day.
                 rollOnFileSizeLimit: true,
-                fileSizeLimitBytes: LogFileSizeLimitBytes,
-                retainedFileCountLimit: 30,
+                fileSizeLimitBytes: sizeLimitBytes,
+                retainedFileCountLimit: config.LogRetainedFileCountLimit,
                 restrictedToMinimumLevel: LogEventLevel.Information,
-                outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
-            .CreateLogger();
+                outputTemplate: LogOutputTemplate);
+
+        if (config.EnableSeparateErrorLog)
+        {
+            logger = logger.WriteTo.File(
+                Path.Combine(logFolder, "errors_.log"),
+                rollingInterval: RollingInterval.Day,
+                rollOnFileSizeLimit: true,
+                fileSizeLimitBytes: sizeLimitBytes,
+                retainedFileCountLimit: config.LogRetainedFileCountLimit,
+                restrictedToMinimumLevel: LogEventLevel.Warning,
+                outputTemplate: LogOutputTemplate);
+        }
+
+        Log.Logger = logger.CreateLogger();
     }
 
     private static ServiceProvider BuildServiceProvider(MigrationConfig config)
@@ -386,10 +416,23 @@ public static class Program
         Console.WriteLine($"Summary report    : {reportWriter.SummaryReportPath}");
 
         if (reportWriter.HasErrorReport)
-            Console.WriteLine($"Error report      : {reportWriter.ErrorReportPath}");
+        {
+            Console.WriteLine(
+                $"Error report      : {reportWriter.ErrorReportPath}" +
+                $"  ({reportWriter.ErrorRowCount:N0} row(s){DescribeParts(reportWriter.ErrorReportPaths.Count)})");
+        }
 
         if (traceWriter.HasTrace)
-            Console.WriteLine($"File trace        : {traceWriter.TracePath}");
+        {
+            Console.WriteLine(
+                $"File trace        : {traceWriter.TracePath}" +
+                $"  ({traceWriter.RowCount:N0} row(s){DescribeParts(traceWriter.TracePaths.Count)})");
+        }
+
+        Console.WriteLine($"Run log           : {Path.GetFullPath(config.LogBasePath)}\\migration_<date>.log");
+
+        if (config.EnableSeparateErrorLog)
+            Console.WriteLine($"Error log         : {Path.GetFullPath(config.LogBasePath)}\\errors_<date>.log");
 
         if (metrics.Failed > 0)
             Console.WriteLine($"Failed documents  : {Path.GetFullPath(config.InputBasePath)}\\<date>\\{FileManager.ErrorFolderName}");
@@ -402,4 +445,11 @@ public static class Program
 
         Console.WriteLine();
     }
+
+    /// <summary>
+    /// Names the extra part files of a split report, so nobody reads part 1 and stops. Silent when
+    /// there is only one part.
+    /// </summary>
+    private static string DescribeParts(int partCount) =>
+        partCount > 1 ? $" in {partCount} parts, _001 to _{partCount:D3}" : string.Empty;
 }

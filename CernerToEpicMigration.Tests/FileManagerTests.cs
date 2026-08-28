@@ -119,9 +119,12 @@ public class FileManagerTests
         DateFolder folder = workspace.AddDateFolder("2026-08-01", 1);
         WorkItem item = new(Path.Combine(folder.Path, "doc_1.xhtml"), folder);
 
-        string? moveError = workspace.CreateFileManager().MoveToError(item, Failure("doc_1.xhtml"));
+        ErrorPlacement placement = workspace.CreateFileManager().MoveToError(item, Failure("doc_1.xhtml"));
 
-        Assert.Null(moveError);
+        Assert.Null(placement.MoveError);
+        Assert.True(placement.Moved);
+        Assert.Equal("doc_1.xhtml", placement.FileName);
+        Assert.Equal("doc_1.error.log", placement.ErrorLogFileName);
         Assert.False(File.Exists(item.FilePath));
 
         string[] errorFiles = workspace.ErrorFiles("2026-08-01");
@@ -145,9 +148,11 @@ public class FileManagerTests
 
         using (File.Open(item.FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
         {
-            string? moveError = workspace.CreateFileManager().MoveToError(item, Failure("doc_1.xhtml"));
+            ErrorPlacement placement = workspace.CreateFileManager().MoveToError(item, Failure("doc_1.xhtml"));
 
-            Assert.NotNull(moveError);
+            Assert.NotNull(placement.MoveError);
+            Assert.False(placement.Moved);
+            Assert.Null(placement.ErrorFilePath);
             Assert.True(File.Exists(item.FilePath));
         }
 

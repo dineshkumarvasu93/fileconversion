@@ -67,9 +67,23 @@ public class Stage1PipelineTests
         Assert.Equal(0, workspace.Metrics.Succeeded);
         Assert.Equal(2, workspace.ErrorFiles("2026-08-01").Length); // the document and its .error.log
         Assert.True(File.Exists(reportWriter.ErrorReportPath));
-        string errorReport = TempWorkspace.ReadShared(reportWriter.ErrorReportPath);
-        Assert.Contains("File Path,Error Category,Error Message", errorReport, StringComparison.Ordinal);
-        Assert.Contains(Path.Combine(folder.Path, "doc_1.xhtml"), errorReport, StringComparison.Ordinal);
+        string[] lines = TempWorkspace.ReadSharedLines(reportWriter.ErrorReportPath);
+        Assert.Equal(2, lines.Length);
+
+        // The row has to name the batch, the log file beside the document and where the document
+        // now is - that is the whole point of it, so it is asserted field by field.
+        string[] row = lines[1].Split(',');
+        Assert.Equal("1", row[0]);
+        Assert.Equal(WorkItem.FormatBatchId("2026-08-01", 1), row[2]);
+        Assert.Equal("2026-08-01", row[3]);
+        Assert.Equal(string.Empty, row[4]);        // Sub Folder - flat date folder
+        Assert.Equal("doc_1.xhtml", row[5]);
+        Assert.Equal("doc_1.xhtml", row[6]);
+        Assert.Equal(nameof(FailureSource.Conversion), row[8]);
+        Assert.Equal("doc_1.error.log", row[12]);
+        Assert.Equal("Yes", row[13]);
+        Assert.Contains(Path.Combine(folder.Path, FileManager.ErrorFolderName, "doc_1.xhtml"), lines[1], StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(folder.Path, "doc_1.xhtml"), lines[1], StringComparison.Ordinal);
     }
 
     [Fact]

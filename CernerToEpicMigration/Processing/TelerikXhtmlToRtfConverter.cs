@@ -45,6 +45,12 @@ public sealed class TelerikXhtmlToRtfConverter : IXhtmlToRtfConverter
         // XhtmlDocumentReader for why that matters to clinical text.
         XhtmlDocument input = XhtmlDocumentReader.Read(inputPath);
 
+        // The importer below accepts anything, including an empty payload and binary noise, and
+        // exports a valid but meaningless RTF for it - which then counts as a converted document
+        // everywhere downstream. This is the only place that can say no.
+        if (_options.ValidateXhtmlContent)
+            XhtmlContentValidator.Validate(input.Text, Path.GetFileName(inputPath));
+
         HtmlFormatProvider htmlProvider = new();
         RadFlowDocument document = htmlProvider.Import(input.Text, timeout);
 

@@ -219,6 +219,8 @@ public sealed class Stage1Pipeline
 
         files = SkipAlreadyConverted(folder, files, resume);
 
+        QuarantineUnmatchedFiles(folder);
+
         _logger.LogInformation("Processing date folder {Folder} ({Files:N0} file(s)).", folder.Name, files.Length);
 
         Directory.CreateDirectory(Path.Combine(Path.GetFullPath(_config.OutputRtfBasePath), folder.Name));
@@ -243,12 +245,16 @@ public sealed class Stage1Pipeline
             batchNumber++;
             _metrics.SetBatch(batchNumber, totalBatches);
 
+            // Stamped once per batch and carried on every work item, so a row of the error report
+            // names the batch it came from and the run log line for that batch gives its timing.
+            string batchId = WorkItem.FormatBatchId(folder.Name, batchNumber);
+
             try
             {
                 await Parallel.ForEachAsync(
                     batch,
                     parallelOptions,
-                    (filePath, token) => ProcessFileAsync(new WorkItem(filePath, folder), token))
+                    (filePath, token) => ProcessFileAsync(new WorkItem(filePath, folder, batchId), token))
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException exception)
@@ -272,8 +278,8 @@ public sealed class Stage1Pipeline
 
             // The dashboard is not there on an unattended run, so progress goes to the log too.
             _logger.LogInformation(
-                "{Folder} batch {Batch}/{Batches} done - {Succeeded:N0} succeeded, {Failed:N0} failed overall, {Rate:N1} files/s.",
-                folder.Name, batchNumber, totalBatches, _metrics.Succeeded, _metrics.Failed, _metrics.FilesPerSecond);
+                "Batch {BatchId} ({Batch}/{Batches}) done - {Succeeded:N0} succeeded, {Failed:N0} failed overall, {Rate:N1} files/s.",
+                batchId, batchNumber, totalBatches, _metrics.Succeeded, _metrics.Failed, _metrics.FilesPerSecond);
         }
 
         folderTimer.Stop();
@@ -405,7 +411,9 @@ public sealed class Stage1Pipeline
                 WorkerSlot: slot,
                 ThreadId: threadId,
                 DateFolder: item.Folder.Name,
+                BatchId: item.BatchId,
                 FileName: Path.GetFileName(item.FilePath),
+                SubFolder: item.SubFolder,
                 StartUtc: startedAt,
                 Duration: held,
                 Attempts: attempts,
@@ -423,27 +431,52 @@ public sealed class Stage1Pipeline
             ErrorMessage: exception.Message,
             Attempts: attempts,
             TimestampUtc: DateTimeOffset.UtcNow,
-            StackTrace: exception.StackTrace);
+            StackTrace: exception.StackTrace,
+            BatchId: item.BatchId,
+            SubFolder: item.SubFolder,
+            Source: FailureSource.Conversion,
+            Reason: DescribeReason(exception, category),
+            FileSizeBytes: FileSizeOrZero(item.FilePath));
 
         _logger.LogError(
             exception,
-            "{Category} failure after {Attempts} attempt(s) for {File}; moving to the error folder.",
-            category, attempts, item.FilePath);
+            "{Category} failure after {Attempts} attempt(s) for {File} in batch {BatchId}; moving to the error folder.",
+            category, attempts, item.FilePath, item.BatchId);
 
+        RecordFailure(item, failure);
+        _metrics.RecordFailure(item.Folder.Name);
+    }
+
+    /// <summary>
+    /// Files one failure: the document into the error folder, the row into the error report. The
+    /// placement is folded back into the failure first, because the report has to name the error
+    /// log and the final location and neither is known until the move has been attempted.
+    /// </summary>
+    private void RecordFailure(WorkItem item, FileFailure failure)
+    {
         try
         {
-            string? moveError = _fileManager.MoveToError(item, failure);
-            if (moveError is not null)
+            ErrorPlacement placement = _fileManager.MoveToError(item, failure);
+
+            failure = failure with
+            {
+                ErrorLogFileName = placement.ErrorLogFileName,
+                ErrorFilePath = placement.ErrorFilePath,
+                MoveError = placement.MoveError
+            };
+
+            if (placement.MoveError is not null)
             {
                 _logger.LogWarning(
                     "{File} stays in the input folder because it could not be moved to the error folder: {Reason}",
-                    item.FilePath, moveError);
+                    item.FilePath, placement.MoveError);
             }
         }
         catch (Exception moveException)
         {
-            // The conversion failure is still recorded; the file simply stays put.
+            // The failure is still recorded; the file simply stays put.
             _logger.LogError(moveException, "Could not write the error record for {File}.", item.FilePath);
+            failure = failure with { MoveError = moveException.Message };
         }
 
         try
@@ -456,8 +489,120 @@ public sealed class Stage1Pipeline
             // of truth, and neither is worth aborting a batch for.
             _logger.LogError(reportException, "The failure of {File} could not be added to the error report.", item.FilePath);
         }
+    }
 
-        _metrics.RecordFailure(item.Folder.Name);
+    /// <summary>
+    /// Moves every file the search pattern does not match into the error folder, with one row of
+    /// the error report each.
+    /// </summary>
+    /// <remarks>
+    /// These files used to be invisible. Discovery filters on
+    /// <c>Processing.FileSearchPattern</c>, so a <c>.pdf</c>, a mistyped <c>.xhtm</c> or a
+    /// half-renamed <c>.xhtml.bak</c> was never counted, never converted and never reported - and
+    /// the date folder still finished clean, with documents sitting in it that nothing had looked
+    /// at. Quarantining them makes them countable: they are added to the folder total before they
+    /// are failed, so the summary arithmetic still holds (found = succeeded + failed) and the
+    /// report says exactly which files they were and why they were rejected.
+    /// <para>
+    /// It runs before the batches, so the folder totals are right before the first progress line,
+    /// and the rows carry <see cref="WorkItem.ScanBatchId"/> rather than a batch number - these
+    /// documents never belonged to a batch.
+    /// </para>
+    /// </remarks>
+    private void QuarantineUnmatchedFiles(DateFolder folder)
+    {
+        if (!_config.Processing.QuarantineUnmatchedFiles)
+            return;
+
+        string[] unmatched;
+        try
+        {
+            unmatched = _discovery.EnumerateUnmatchedFiles(folder).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Never let the tidy-up sweep stop the conversion it runs in front of.
+            _logger.LogWarning(exception, "Could not list the unmatched files of {Folder}.", folder.Name);
+            return;
+        }
+
+        if (unmatched.Length == 0)
+            return;
+
+        _logger.LogWarning(
+            "{Count:N0} file(s) in {Folder} do not match the search pattern {Pattern}; moving them to the error folder.",
+            unmatched.Length, folder.Name, _config.Processing.FileSearchPattern);
+
+        // Counted in before they are failed, so processed never exceeds found.
+        _metrics.RegisterFolder(folder.Name, unmatched.Length);
+
+        foreach (string filePath in unmatched)
+        {
+            WorkItem item = new(filePath, folder);
+            string fileName = Path.GetFileName(filePath);
+            string pattern = _config.Processing.FileSearchPattern;
+
+            FileFailure failure = new(
+                FilePath: Path.GetFullPath(filePath),
+                DateFolder: folder.Name,
+                Category: ErrorCategory.Permanent,
+                ErrorType: PatternMismatchErrorType,
+                ErrorMessage:
+                    $"{fileName} does not match the configured search pattern {pattern}, " +
+                    "so it was never a conversion candidate.",
+                Attempts: 0,
+                TimestampUtc: DateTimeOffset.UtcNow,
+                StackTrace: null,
+                BatchId: WorkItem.ScanBatchId,
+                SubFolder: item.SubFolder,
+                Source: FailureSource.Discovery,
+                Reason: $"File name does not match {pattern}",
+                FileSizeBytes: FileSizeOrZero(filePath));
+
+            RecordFailure(item, failure);
+            _metrics.RecordFailure(folder.Name);
+        }
+    }
+
+    /// <summary>
+    /// Stands in for an exception type name in the error report, so the Error Type column groups
+    /// pattern rejections the way it groups everything else.
+    /// </summary>
+    private const string PatternMismatchErrorType = "FileSearchPatternMismatch";
+
+    /// <summary>
+    /// Plain-language reason for a failure. The exception type and message are in the report too,
+    /// but neither groups well: an operator scanning tens of thousands of rows needs a column with
+    /// a handful of distinct values in it to see that 9,000 of them are the same problem.
+    /// </summary>
+    private static string DescribeReason(Exception exception, ErrorCategory category) => exception switch
+    {
+        NotXhtmlContentException => "The file holds no XHTML document",
+        Base64DecodingException => "The file is not a decodable Base64 envelope",
+        PathTooLongException => "Path is longer than the file system allows",
+        FileNotFoundException => "The file disappeared before it could be read",
+        DirectoryNotFoundException => "The folder disappeared before the file could be read",
+        TimeoutException => "Conversion exceeded ConversionTimeoutSeconds",
+        UnauthorizedAccessException => "Access denied to the file or the output folder",
+        OutOfMemoryException => "Not enough memory to convert the document",
+        OperationCanceledException => "Stopped while the document was being converted",
+        IOException when category == ErrorCategory.Fatal => "The output volume is full or unreachable",
+        IOException => "The file is locked or the volume is unavailable",
+        _ => $"Conversion failed ({exception.GetType().Name})"
+    };
+
+    /// <summary>Size on disk, or 0 when it cannot be read - never a reason to fail a failure.</summary>
+    private static long FileSizeOrZero(string filePath)
+    {
+        try
+        {
+            FileInfo info = new(filePath);
+            return info.Exists ? info.Length : 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
     }
 
     private void RaiseFatal(WorkItem item, Exception exception)

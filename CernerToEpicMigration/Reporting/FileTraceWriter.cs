@@ -1,8 +1,6 @@
-using System.Diagnostics;
-using System.Globalization;
-using System.Text;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
+using System.Globalization;
 
 namespace CernerToEpicMigration.Reporting;
 
@@ -21,6 +19,12 @@ namespace CernerToEpicMigration.Reporting;
 /// document can start on thread 12 and finish on thread 31. Both columns are written - the thread
 /// id is useful when correlating with an external profiler, and misleading for anything else.
 /// </para>
+/// <para>
+/// At roughly 130 bytes a row a million-document run traces about 130 MB, which is why the trace
+/// is written in parts of <c>Processing.MaxReportRowsPerFile</c> rows rather than as one file:
+/// a part opens in a spreadsheet, a 130 MB CSV does not. The batch id column is what joins a
+/// trace row back to the error report and to the per-batch lines in the run log.
+/// </para>
 /// </remarks>
 public sealed class FileTraceWriter : IDisposable
 {
@@ -30,26 +34,37 @@ public sealed class FileTraceWriter : IDisposable
     /// <summary>How stale the on-disk trace is allowed to get while a run is going.</summary>
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
 
-    private readonly MigrationConfig _config;
-    private readonly object _writeLock = new();
-    private readonly Stopwatch _sinceLastFlush = new();
+    private const string TraceHeader =
+        "Worker Slot,Thread Id,Date Folder,Batch Id,Sub Folder,File Name,Start Utc,End Utc,Duration Ms,Attempts,Outcome";
 
-    private StreamWriter? _writer;
-    private int _rowsSinceLastFlush;
+    private readonly MigrationConfig _config;
+    private readonly RollingCsvWriter _trace;
 
     public FileTraceWriter(MigrationConfig config, string timestamp)
     {
         _config = config;
-        TracePath = Path.Combine(
-            Path.GetFullPath(config.ReportBasePath), $"file_trace_{timestamp}.csv");
+        _trace = new RollingCsvWriter(
+            config.ReportBasePath,
+            $"file_trace_{timestamp}",
+            TraceHeader,
+            config.Processing.MaxReportRowsPerFile,
+            FlushRowThreshold,
+            FlushInterval);
     }
 
-    public string TracePath { get; }
+    /// <summary>First part of the trace. Known before any row is written.</summary>
+    public string TracePath => _trace.FirstPartPath;
+
+    /// <summary>Every trace part written so far, in order.</summary>
+    public IReadOnlyList<string> TracePaths => _trace.Parts;
 
     public bool IsEnabled => _config.Processing.EnableFileTrace;
 
     /// <summary>True once at least one row has been written.</summary>
-    public bool HasTrace { get; private set; }
+    public bool HasTrace => _trace.HasRows;
+
+    /// <summary>Rows written across every part.</summary>
+    public long RowCount => _trace.RowCount;
 
     /// <summary>Appends one row. Safe to call from worker threads; a no-op when the trace is off.</summary>
     public void Record(FileTrace trace)
@@ -57,74 +72,22 @@ public sealed class FileTraceWriter : IDisposable
         if (!IsEnabled)
             return;
 
-        lock (_writeLock)
-        {
-            if (_writer is null)
-            {
-                Directory.CreateDirectory(Path.GetFullPath(_config.ReportBasePath));
-
-                // FileShare.ReadWrite so the trace can be tailed or opened while the run is going.
-                FileStream stream = new(TracePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-                _writer = new StreamWriter(stream, Encoding.UTF8);
-                _writer.WriteLine(
-                    "Worker Slot,Thread Id,Date Folder,File Name,Start Utc,End Utc,Duration Ms,Attempts,Outcome");
-                _sinceLastFlush.Start();
-            }
-
-            _writer.WriteLine(string.Join(',',
-                trace.WorkerSlot.ToString(CultureInfo.InvariantCulture),
-                trace.ThreadId.ToString(CultureInfo.InvariantCulture),
-                Escape(trace.DateFolder),
-                Escape(trace.FileName),
-                trace.StartUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
-                (trace.StartUtc + trace.Duration).UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
-                trace.Duration.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture),
-                trace.Attempts.ToString(CultureInfo.InvariantCulture),
-                Escape(trace.Outcome)));
-
-            HasTrace = true;
-
-            // Same reasoning as the error report: a flush per row would put a disk round-trip in
-            // the hot path of every single document, which is the one place this must not cost
-            // anything measurable - the trace is there to measure the run, not to change it.
-            if (++_rowsSinceLastFlush >= FlushRowThreshold || _sinceLastFlush.Elapsed >= FlushInterval)
-                FlushCore();
-        }
+        _trace.Write(
+            trace.WorkerSlot.ToString(CultureInfo.InvariantCulture),
+            trace.ThreadId.ToString(CultureInfo.InvariantCulture),
+            trace.DateFolder,
+            trace.BatchId,
+            trace.SubFolder,
+            trace.FileName,
+            trace.StartUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
+            (trace.StartUtc + trace.Duration).UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
+            trace.Duration.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture),
+            trace.Attempts.ToString(CultureInfo.InvariantCulture),
+            trace.Outcome);
     }
 
     /// <summary>Writes any buffered rows to disk. Called at each batch boundary.</summary>
-    public void Flush()
-    {
-        lock (_writeLock)
-        {
-            FlushCore();
-        }
-    }
+    public void Flush() => _trace.Flush();
 
-    private void FlushCore()
-    {
-        _writer?.Flush();
-        _rowsSinceLastFlush = 0;
-        _sinceLastFlush.Restart();
-    }
-
-    private static string Escape(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-            return string.Empty;
-
-        string sanitised = value.Replace("\r", " ").Replace("\n", " ");
-        return sanitised.Contains(',') || sanitised.Contains('"')
-            ? $"\"{sanitised.Replace("\"", "\"\"")}\""
-            : sanitised;
-    }
-
-    public void Dispose()
-    {
-        lock (_writeLock)
-        {
-            _writer?.Dispose();
-            _writer = null;
-        }
-    }
+    public void Dispose() => _trace.Dispose();
 }

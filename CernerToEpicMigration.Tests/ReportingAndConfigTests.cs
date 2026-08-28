@@ -23,9 +23,15 @@ public class ReportWriterTests
 
         string[] lines = TempWorkspace.ReadSharedLines(writer.ErrorReportPath);
         Assert.Equal(2, lines.Length);
-        Assert.Equal("File Path,Error Category,Error Message", lines[0].TrimStart('\uFEFF'));
+        Assert.StartsWith(
+            "Row,Error Time Utc,Batch Id,Date Folder,Sub Folder,File Name,Actual File Name",
+            lines[0].TrimStart('\uFEFF'),
+            StringComparison.Ordinal);
         Assert.Contains(filePath, lines[1], StringComparison.Ordinal);
-        Assert.EndsWith(",Permanent,\"Invalid element, line 42, column 7\"", lines[1], StringComparison.Ordinal);
+        Assert.Contains(",Permanent,", lines[1], StringComparison.Ordinal);
+
+        // The message is the second-to-last column now, with Move Error empty behind it.
+        Assert.EndsWith("\"Invalid element, line 42, column 7\",", lines[1], StringComparison.Ordinal);
     }
 
     [Fact]
