@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;
@@ -342,7 +342,9 @@ public sealed class Stage1Pipeline
         long startTicks = Stopwatch.GetTimestamp();
 
         string outcomeLabel = "Cancelled";
+        WorkerOutcome workerOutcome = WorkerOutcome.Abandoned;
         int attempts = 0;
+        ConversionPhases phases = default;
 
         try
         {
@@ -357,10 +359,21 @@ public sealed class Stage1Pipeline
                 {
                     string outputPath = _fileManager.GetRtfOutputPath(item);
                     ConversionOutcome outcome = _converter.Convert(item.FilePath, outputPath);
+
+                    // The archive move is timed here rather than in the converter because it is
+                    // the pipeline's decision, not the conversion's - and it is the one file
+                    // system operation that touches the input folder every other worker is also
+                    // enumerating and moving out of, so it is a prime suspect when threads stop
+                    // buying throughput.
+                    long archiveMark = Stopwatch.GetTimestamp();
                     _fileManager.ArchiveSuccess(item);
+
+                    phases = outcome.Phases.WithArchive(Stopwatch.GetTimestamp() - archiveMark);
+                    _metrics.RecordPhases(phases);
                     _metrics.RecordSuccess(item.Folder.Name, outcome.InputBytes, outcome.OutputBytes);
 
                     outcomeLabel = "Succeeded";
+                    workerOutcome = WorkerOutcome.Succeeded;
                     _logger.LogDebug(
                         "Converted {File} ({InputBytes} bytes) to {Output} ({OutputBytes} bytes) on attempt {Attempt}.",
                         item.FilePath, outcome.InputBytes, outputPath, outcome.OutputBytes, attempts);
@@ -397,12 +410,13 @@ public sealed class Stage1Pipeline
             }
 
             outcomeLabel = $"Failed:{category}";
+            workerOutcome = WorkerOutcome.Failed;
             FailFile(item, lastError!, category, attempts);
         }
         finally
         {
             TimeSpan held = Stopwatch.GetElapsedTime(startTicks);
-            _metrics.WorkerFinished(slot, held);
+            _metrics.WorkerFinished(slot, held, workerOutcome);
 
             // Recorded on every path, including the cancelled one - a trace that silently drops
             // the files that were in flight when the run stopped would understate concurrency at
@@ -417,7 +431,8 @@ public sealed class Stage1Pipeline
                 StartUtc: startedAt,
                 Duration: held,
                 Attempts: attempts,
-                Outcome: outcomeLabel));
+                Outcome: outcomeLabel,
+                Phases: phases));
         }
     }
 

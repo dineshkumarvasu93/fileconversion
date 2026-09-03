@@ -1,8 +1,9 @@
-using CernerToEpicMigration.Cli;
+﻿using CernerToEpicMigration.Cli;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;
 using CernerToEpicMigration.Processing;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using CernerToEpicMigration.Reporting;
 using CernerToEpicMigration.Startup;
@@ -322,13 +323,28 @@ public static class Program
         // Configured vs observed, in the run log as well as the summary CSV, because this is the
         // line that says whether the parallelism setting did anything.
         Log.Information(
-            "Workers: {Configured} configured, {Peak} peak concurrent, {Average:F2} average ({Utilisation:F0}% occupied).",
+            "Workers: {Configured} configured, {Peak} peak concurrent, {Average:F2} average ({Utilisation:F0}% occupied), "
+            + "{ServiceTime:F1} ms per document per worker.",
             config.Processing.EffectiveParallelism,
             metrics.PeakActiveWorkers,
             metrics.AverageConcurrency,
             config.Processing.EffectiveParallelism <= 0
                 ? 0
-                : metrics.AverageConcurrency / config.Processing.EffectiveParallelism * 100d);
+                : metrics.AverageConcurrency / config.Processing.EffectiveParallelism * 100d,
+            metrics.AverageServiceTimeMs);
+
+        // One line per worker slot, so an unattended run has the same breakdown the summary CSV
+        // gets without anyone having to open the CSV.
+        foreach (WorkerStatistics worker in metrics.GetWorkerStatistics())
+        {
+            Log.Information(
+                "Worker {Slot}: {Processed:N0} document(s) ({Succeeded:N0} succeeded, {Failed:N0} failed), "
+                + "busy {Busy:hh\\:mm\\:ss}, {AverageMs:F1} ms per document.",
+                worker.Slot, worker.Processed, worker.Succeeded, worker.Failed, worker.Busy,
+                worker.AverageMillisecondsPerFile);
+        }
+
+        LogPhaseSplit(metrics);
 
         PrintFinalSummary(config, metrics, reportWriter, traceWriter, status, result);
 
@@ -412,7 +428,18 @@ public static class Program
         Console.WriteLine($"Throughput        : {metrics.FilesPerSecond:N1} files/s ({metrics.FilesPerSecond * 3600:N0} files/hour)");
         Console.WriteLine(
             $"Workers           : {config.Processing.EffectiveParallelism} configured, " +
-            $"{metrics.PeakActiveWorkers} peak, {metrics.AverageConcurrency:N2} average");
+            $"{metrics.PeakActiveWorkers} peak, {metrics.AverageConcurrency:N2} average, " +
+            $"{metrics.AverageServiceTimeMs:N1} ms/document each");
+
+        foreach (WorkerStatistics worker in metrics.GetWorkerStatistics())
+        {
+            Console.WriteLine(
+                $"  worker {worker.Slot,-4}      : {worker.Processed,10:N0} document(s), " +
+                $"busy {worker.Busy:hh\\:mm\\:ss}, {worker.AverageMillisecondsPerFile:N1} ms each");
+        }
+
+        WritePhaseLine(metrics);
+
         Console.WriteLine($"Summary report    : {reportWriter.SummaryReportPath}");
 
         if (reportWriter.HasErrorReport)
@@ -450,6 +477,69 @@ public static class Program
     /// Names the extra part files of a split report, so nobody reads part 1 and stops. Silent when
     /// there is only one part.
     /// </summary>
+    /// <summary>
+    /// The CPU-versus-disk split of a run, on one console line.
+    /// </summary>
+    /// <remarks>
+    /// This is the line a tuning run is read for. Throughput says how fast the run was and the
+    /// worker figures say whether the threads were busy; neither says what they were busy on, and
+    /// without that "adding threads did not help" has no follow-up action. The split does: time in
+    /// Telerik points at cores, time in the file system points at the volume, the directories
+    /// every worker shares, or an on-access scanner. Per-phase detail is in the summary CSV.
+    /// </remarks>
+    private static void WritePhaseLine(MetricsCollector metrics)
+    {
+        ConversionPhases phases = metrics.PhaseTotals;
+        if (phases.TotalTicks == 0)
+            return;
+
+        (double cpuPercent, double diskPercent, double cpuMs, double diskMs) = SplitPhases(phases, metrics.Succeeded);
+
+        Console.WriteLine(
+            $"Time per document : {cpuMs:N1} ms CPU ({cpuPercent:N0}%), {diskMs:N1} ms disk ({diskPercent:N0}%)");
+    }
+
+    /// <summary>The same split in the run log, for an unattended run that has no console.</summary>
+    private static void LogPhaseSplit(MetricsCollector metrics)
+    {
+        ConversionPhases phases = metrics.PhaseTotals;
+        if (phases.TotalTicks == 0)
+            return;
+
+        (double cpuPercent, double diskPercent, double cpuMs, double diskMs) = SplitPhases(phases, metrics.Succeeded);
+
+        Log.Information(
+            "Phase split per document: {CpuMs:F1} ms CPU ({CpuPercent:F0}%) - decode {DecodeMs:F1}, "
+            + "import {ImportMs:F1}, export {ExportMs:F1}; {DiskMs:F1} ms disk ({DiskPercent:F0}%) - "
+            + "read {ReadMs:F1}, write {WriteMs:F1}, archive {ArchiveMs:F1}.",
+            cpuMs, cpuPercent,
+            PerFileMs(phases.DecodeTicks + phases.ValidateTicks, metrics.Succeeded),
+            PerFileMs(phases.ImportTicks, metrics.Succeeded),
+            PerFileMs(phases.ExportTicks, metrics.Succeeded),
+            diskMs, diskPercent,
+            PerFileMs(phases.ReadTicks, metrics.Succeeded),
+            PerFileMs(phases.WriteTicks, metrics.Succeeded),
+            PerFileMs(phases.ArchiveTicks, metrics.Succeeded));
+    }
+
+    /// <summary>Splits the phase totals into the CPU half and the file system half.</summary>
+    private static (double CpuPercent, double DiskPercent, double CpuMs, double DiskMs) SplitPhases(
+        ConversionPhases phases, long converted)
+    {
+        long cpuTicks = phases.DecodeTicks + phases.ValidateTicks + phases.ImportTicks + phases.ExportTicks;
+        long diskTicks = phases.ReadTicks + phases.WriteTicks + phases.ArchiveTicks;
+        long total = cpuTicks + diskTicks;
+
+        return (
+            total == 0 ? 0 : cpuTicks * 100d / total,
+            total == 0 ? 0 : diskTicks * 100d / total,
+            PerFileMs(cpuTicks, converted),
+            PerFileMs(diskTicks, converted));
+    }
+
+    private static double PerFileMs(long ticks, long files) =>
+        files <= 0 ? 0 : ticks * 1000d / Stopwatch.Frequency / files;
+
     private static string DescribeParts(int partCount) =>
         partCount > 1 ? $" in {partCount} parts, _001 to _{partCount:D3}" : string.Empty;
 }

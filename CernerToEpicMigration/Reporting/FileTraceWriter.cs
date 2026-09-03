@@ -1,5 +1,6 @@
-using CernerToEpicMigration.Configuration;
+﻿using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace CernerToEpicMigration.Reporting;
@@ -34,8 +35,16 @@ public sealed class FileTraceWriter : IDisposable
     /// <summary>How stale the on-disk trace is allowed to get while a run is going.</summary>
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Milliseconds a <see cref="Stopwatch"/> tick is worth. The phase columns are recorded in
+    /// ticks so they can be summed losslessly; they are written in milliseconds because that is
+    /// what a person reading a row needs.
+    /// </summary>
+    private static readonly double MillisecondsPerTick = 1000d / Stopwatch.Frequency;
+
     private const string TraceHeader =
-        "Worker Slot,Thread Id,Date Folder,Batch Id,Sub Folder,File Name,Start Utc,End Utc,Duration Ms,Attempts,Outcome";
+        "Worker Slot,Thread Id,Date Folder,Batch Id,Sub Folder,File Name,Start Utc,End Utc,Duration Ms,Attempts,Outcome," +
+        "Read Ms,Decode Ms,Validate Ms,Import Ms,Export Ms,Write Ms,Archive Ms";
 
     private readonly MigrationConfig _config;
     private readonly RollingCsvWriter _trace;
@@ -83,8 +92,23 @@ public sealed class FileTraceWriter : IDisposable
             (trace.StartUtc + trace.Duration).UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
             trace.Duration.TotalMilliseconds.ToString("F1", CultureInfo.InvariantCulture),
             trace.Attempts.ToString(CultureInfo.InvariantCulture),
-            trace.Outcome);
+            trace.Outcome,
+            Milliseconds(trace.Phases.ReadTicks),
+            Milliseconds(trace.Phases.DecodeTicks),
+            Milliseconds(trace.Phases.ValidateTicks),
+            Milliseconds(trace.Phases.ImportTicks),
+            Milliseconds(trace.Phases.ExportTicks),
+            Milliseconds(trace.Phases.WriteTicks),
+            Milliseconds(trace.Phases.ArchiveTicks));
     }
+
+    /// <summary>
+    /// One phase duration as milliseconds. Three decimals because a decode or a directory probe
+    /// is routinely under a tenth of a millisecond, and rounding those to zero would hide exactly
+    /// the per-file overhead the trace is there to expose.
+    /// </summary>
+    private static string Milliseconds(long ticks) =>
+        (ticks * MillisecondsPerTick).ToString("F3", CultureInfo.InvariantCulture);
 
     /// <summary>Writes any buffered rows to disk. Called at each batch boundary.</summary>
     public void Flush() => _trace.Flush();

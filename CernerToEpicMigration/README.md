@@ -1,4 +1,4 @@
-# Cerner to Epic Migration — Stage 1 (XHTML → RTF)
+﻿# Cerner to Epic Migration — Stage 1 (XHTML → RTF)
 
 Implementation of **Stage 1 only** from `CernerToEpic-Migration-Design-Document.md`: read Cerner
 XHTML documents from date-wise input folders, Base64-decode them, convert them to RTF with Telerik
@@ -41,7 +41,7 @@ build and migration servers.
                           \error\                      failed originals + <name>.error.log
 {OutputRtfBasePath}\2026-08-01\doc_001.rtf             converted output
                              \patient_001\doc_a.rtf    patient folder is mirrored, not flattened
-{ReportBasePath}\migration_report_{timestamp}.csv      summary + per-folder breakdown
+{ReportBasePath}\migration_report_{timestamp}.csv      summary + per-folder and per-worker breakdown
                 \error_report_{timestamp}_001.csv      one row per failed document
                 \file_trace_{timestamp}_001.csv        one row per document (opt-in)
                 \checkpoint.json                       written after every batch
@@ -80,6 +80,15 @@ rather than a failed overnight run:
 | **Base64 envelope** | Every input file is Base64-decoded first. Line-wrapped envelopes and a leading BOM are accepted; anything that is not decodable Base64 (including unwrapped markup) is a permanent failure and goes straight to the error folder — never to the converter. |
 | **Encoding** | The *decoded* payload is decoded by BOM, then by declared XML/meta charset, then UTF-8, with a windows-1252 fallback for legacy bytes. Accents, degree and micro signs survive as RTF `\uN` escapes. |
 | **Error report** | Written with a shared handle and auto-flush, so it can be opened or tailed mid-run; a failure to write it is logged and never aborts processing. |
+
+## Scaling to multiple instances
+
+For very large volumes (hundreds of thousands to millions of files), several instances of this
+application can be run in parallel — one process per machine or per machine-core-budget, each given
+its own `InputBasePath`/`OutputRtfBasePath`/`ReportBasePath`/`LogBasePath` (or its own
+`--date-folder` against a shared input root). See
+[docs/MultiInstanceProcessing.md](docs/MultiInstanceProcessing.md) for the partitioning scheme, how
+duplicate processing is avoided, and performance/monitoring considerations at scale.
 
 ## Tests
 
@@ -298,6 +307,48 @@ see what the run was doing around that batch. Use `errors_*.log` when the questi
 run rather than a document (a fatal error, a folder that could not be read, `MaxErrorLogFiles`
 being hit). The optional `file_trace_*_NNN.csv` splits on the same `MaxReportRowsPerFile` setting
 and carries the same `Batch Id`, so the three join up.
+
+## Tuning the thread count
+
+`migration_report_*.csv` ends with three sections written for exactly one question: *does raising
+`MaxDegreeOfParallelism` buy anything?*
+
+**Per-Worker Breakdown** — one row per worker slot: documents handled, busy time, and
+`Avg ms/File`. The counts should come out within a few percent of each other; one slot far ahead
+of the rest means the others were starved.
+
+**`Average Worker Service Time (ms)`** in the header — per-document wall-clock time for *one*
+worker, so it is independent of how many ran. This is the scaling test. Compare it across runs at
+1, 2, 3 and 4 threads:
+
+| Service time as threads are added | What it means |
+| --- | --- |
+| Flat | The threads are converting in parallel. Raise the count until it stops being flat. |
+| Rises with the thread count | The workers are queueing for one shared resource. Throughput will not improve, and past the peak it goes backwards. |
+
+**Phase Breakdown** — where a document's time actually went, split into the two groups that call
+for opposite fixes:
+
+- `Telerik import` / `Telerik export` / `Decode` are **CPU**, in-process. Growing with the thread
+  count means the machine is out of cores or the library is serialising internally; faster disks
+  will not help.
+- `Read input` / `Write output` / `Archive input` are the **file system**. Growing with the thread
+  count means the workers are queueing on the volume, on the NTFS index of a directory they all
+  write to, or on an on-access virus scanner; more cores will not help.
+
+The same split is printed at the end of a run and written to `migration_*.log`, so an unattended
+run answers the question without anyone opening a CSV:
+
+```
+Time per document : 43.6 ms CPU (71%), 18.2 ms disk (29%)
+```
+
+Set `EnableFileTrace` to `true` for the per-document version: `file_trace_*.csv` carries the same
+seven phase columns per row, so a slow tail can be traced to a phase and a batch.
+
+A tuning run does not need the full input. Point `--input` at a copy of one representative date
+folder, run it at 1, 2, 3 and 4 threads, and read the three sections. Keep the runs long enough
+that JIT warm-up is not the measurement — a few thousand documents, not thirty.
 
 ## Error handling
 

@@ -312,5 +312,40 @@ public class ConcurrencyAndRetryTests
         Assert.Contains("Peak Concurrent Workers,4", summary, StringComparison.Ordinal);
         Assert.Contains("Average Concurrent Workers,", summary, StringComparison.Ordinal);
         Assert.Contains("Worker Utilisation (%),", summary, StringComparison.Ordinal);
+        Assert.Contains("Average Worker Service Time (ms),", summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_summary_report_breaks_the_documents_down_by_worker_slot()
+    {
+        using TempWorkspace workspace = new();
+        workspace.AddDateFolder("2026-08-01", 80);
+        workspace.Config.Processing.MaxDegreeOfParallelism = 4;
+        workspace.Config.Processing.BatchSize = 80;
+
+        InstrumentedConverter converter = new(work: TimeSpan.FromMilliseconds(10));
+
+        using ReportWriter reportWriter = workspace.CreateReportWriter();
+        await workspace.CreatePipeline(reportWriter, converter)
+            .RunAsync(new RunOptions(DateFolder: null, Resume: false), CancellationToken.None);
+
+        IReadOnlyList<WorkerStatistics> workers = workspace.Metrics.GetWorkerStatistics();
+
+        // Slots are recycled, so a run of 80 documents on 4 workers uses about 4 slots, not 80.
+        Assert.InRange(workers.Count, 1, 4);
+
+        // Every document is attributed to exactly one slot, and the slots agree with the totals.
+        Assert.Equal(80, workers.Sum(worker => worker.Processed));
+        Assert.Equal(workspace.Metrics.Succeeded, workers.Sum(worker => (long)worker.Succeeded));
+        Assert.All(workers, worker => Assert.True(worker.AverageMillisecondsPerFile > 0));
+
+        reportWriter.WriteSummary(workspace.Metrics, "COMPLETED");
+        string summary = TempWorkspace.ReadShared(reportWriter.SummaryReportPath);
+
+        Assert.Contains("--- Per-Worker Breakdown ---", summary, StringComparison.Ordinal);
+        Assert.Contains(
+            "Worker Slot,Files Processed,Succeeded,Failed,Abandoned,Busy Time,Busy (% of run),Avg ms/File,Files Per Second",
+            summary,
+            StringComparison.Ordinal);
     }
 }

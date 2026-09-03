@@ -1,4 +1,6 @@
-﻿namespace CernerToEpicMigration.Models;
+﻿using CernerToEpicMigration.Processing;
+
+namespace CernerToEpicMigration.Models;
 
 /// <summary>Error categories from design document section 10.1.</summary>
 public enum ErrorCategory
@@ -156,7 +158,8 @@ public readonly record struct FileTrace(
     DateTimeOffset StartUtc,
     TimeSpan Duration,
     int Attempts,
-    string Outcome);
+    string Outcome,
+    ConversionPhases Phases = default);
 
 /// <summary>Per-date-folder totals used by the dashboard and the summary report.</summary>
 public sealed class FolderStatistics
@@ -172,6 +175,53 @@ public sealed class FolderStatistics
     public TimeSpan Elapsed { get; set; }
 
     public int Processed => Succeeded + Failed;
+}
+
+/// <summary>How a worker slot finished with the document it was holding.</summary>
+public enum WorkerOutcome
+{
+    /// <summary>The RTF was written and the input archived.</summary>
+    Succeeded,
+
+    /// <summary>The document exhausted its attempts and went to the error folder.</summary>
+    Failed,
+
+    /// <summary>The run stopped - cancelled or fatal - while the worker still held the document.</summary>
+    Abandoned
+}
+
+/// <summary>
+/// Per-worker-slot counters behind the summary report's per-worker breakdown.
+/// </summary>
+/// <remarks>
+/// The slot, not the managed thread id, is the worker identity: a slot is held for the whole of
+/// one document, while the thread underneath it can change at the retry await. Slots are recycled,
+/// so there are only ever about <c>MaxDegreeOfParallelism</c> of these however long the run is.
+/// </remarks>
+public sealed class WorkerStatistics
+{
+    public required int Slot { get; init; }
+
+    public int Succeeded;
+
+    public int Failed;
+
+    public int Abandoned;
+
+    /// <summary>Ticks this slot spent holding a document, retry backoff included.</summary>
+    public long BusyTicks;
+
+    public int Processed => Succeeded + Failed + Abandoned;
+
+    public TimeSpan Busy => TimeSpan.FromTicks(Interlocked.Read(ref BusyTicks));
+
+    /// <summary>
+    /// Wall-clock time this slot took per document. Read across runs at different thread counts
+    /// this is the scaling test: if it climbs as workers are added, the workers are queueing for
+    /// something shared rather than converting in parallel.
+    /// </summary>
+    public double AverageMillisecondsPerFile =>
+        Processed == 0 ? 0 : Busy.TotalMilliseconds / Processed;
 }
 
 /// <summary>Outcome of a Stage 1 run.</summary>

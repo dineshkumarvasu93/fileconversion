@@ -1,6 +1,7 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using CernerToEpicMigration.Models;
+using CernerToEpicMigration.Processing;
 
 namespace CernerToEpicMigration.Monitoring;
 
@@ -22,6 +23,9 @@ public sealed class MetricsCollector
     /// </summary>
     private readonly ConcurrentBag<int> _freeSlots = new();
 
+    /// <summary>Per-slot counters, keyed by the slot id <see cref="WorkerStarted"/> hands out.</summary>
+    private readonly ConcurrentDictionary<int, WorkerStatistics> _workers = new();
+
     private long _totalFound;
     private long _succeeded;
     private long _failed;
@@ -29,6 +33,14 @@ public sealed class MetricsCollector
     private long _bytesRead;
     private long _bytesWritten;
     private long _workerTicks;
+    private long _workerFiles;
+    private long _readTicks;
+    private long _decodeTicks;
+    private long _validateTicks;
+    private long _importTicks;
+    private long _exportTicks;
+    private long _writeTicks;
+    private long _archiveTicks;
     private int _currentBatch;
     private int _totalBatches;
     private int _errorsInCurrentBatch;
@@ -94,6 +106,56 @@ public sealed class MetricsCollector
     }
 
     public int ErrorsInCurrentBatch => _errorsInCurrentBatch;
+
+    /// <summary>
+    /// Wall-clock time one worker spent per document, averaged over every worker and document.
+    /// Unlike <see cref="FilesPerSecond"/> this is independent of how many workers ran, so it is
+    /// the number to compare between runs at different thread counts: it should stay flat as
+    /// workers are added. Rising in step with the thread count means the workers are contending
+    /// for one shared resource - a lock, a disk, a directory - rather than converting in parallel,
+    /// which is exactly the case where more threads buy no throughput.
+    /// </summary>
+    public double AverageServiceTimeMs
+    {
+        get
+        {
+            long files = Interlocked.Read(ref _workerFiles);
+            return files == 0 ? 0 : TimeSpan.FromTicks(Interlocked.Read(ref _workerTicks)).TotalMilliseconds / files;
+        }
+    }
+
+    /// <summary>
+    /// Where the time of every converted document went, summed across the run.
+    /// </summary>
+    /// <remarks>
+    /// Only successful conversions are counted. A failed document exits its phase part-way
+    /// through and would charge a truncated import against a document that was never imported,
+    /// which is exactly the sort of half-measurement that sends a tuning exercise the wrong way.
+    /// </remarks>
+    public ConversionPhases PhaseTotals => new(
+        Interlocked.Read(ref _readTicks),
+        Interlocked.Read(ref _decodeTicks),
+        Interlocked.Read(ref _validateTicks),
+        Interlocked.Read(ref _importTicks),
+        Interlocked.Read(ref _exportTicks),
+        Interlocked.Read(ref _writeTicks),
+        Interlocked.Read(ref _archiveTicks));
+
+    /// <summary>Adds one document's phase timings to the run totals.</summary>
+    public void RecordPhases(ConversionPhases phases)
+    {
+        Interlocked.Add(ref _readTicks, phases.ReadTicks);
+        Interlocked.Add(ref _decodeTicks, phases.DecodeTicks);
+        Interlocked.Add(ref _validateTicks, phases.ValidateTicks);
+        Interlocked.Add(ref _importTicks, phases.ImportTicks);
+        Interlocked.Add(ref _exportTicks, phases.ExportTicks);
+        Interlocked.Add(ref _writeTicks, phases.WriteTicks);
+        Interlocked.Add(ref _archiveTicks, phases.ArchiveTicks);
+    }
+
+    /// <summary>Snapshot of the per-worker counters, ordered by slot.</summary>
+    public IReadOnlyList<WorkerStatistics> GetWorkerStatistics() =>
+        _workers.Values.OrderBy(worker => worker.Slot).ToList();
 
     public TimeSpan Elapsed => _stopwatch.Elapsed;
 
@@ -184,12 +246,29 @@ public sealed class MetricsCollector
     /// sleeping worker is one that cannot take the next file, which is exactly what the
     /// occupancy figure is meant to show.
     /// </summary>
-    public void WorkerFinished(int slot, TimeSpan held)
+    public void WorkerFinished(int slot, TimeSpan held, WorkerOutcome outcome)
     {
+        WorkerStatistics statistics = _workers.GetOrAdd(slot, key => new WorkerStatistics { Slot = key });
+        Interlocked.Add(ref statistics.BusyTicks, held.Ticks);
+
+        switch (outcome)
+        {
+            case WorkerOutcome.Succeeded:
+                Interlocked.Increment(ref statistics.Succeeded);
+                break;
+            case WorkerOutcome.Failed:
+                Interlocked.Increment(ref statistics.Failed);
+                break;
+            default:
+                Interlocked.Increment(ref statistics.Abandoned);
+                break;
+        }
+
         // Returned before the count drops so the next worker reuses this slot rather than
         // minting a new one.
         _freeSlots.Add(slot);
         Interlocked.Add(ref _workerTicks, held.Ticks);
+        Interlocked.Increment(ref _workerFiles);
         Interlocked.Decrement(ref _activeWorkers);
     }
 

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.RegularExpressions;
 
 namespace CernerToEpicMigration.Processing;
@@ -30,9 +30,19 @@ public static partial class XhtmlDocumentReader
     /// decoded with the encoding it declares.
     /// </summary>
     /// <exception cref="Base64DecodingException">The file is not a decodable envelope.</exception>
-    public static XhtmlDocument Read(string path)
+    public static XhtmlDocument Read(string path) => ReadEnvelope(File.ReadAllBytes(path));
+
+    /// <summary>
+    /// Unwraps and decodes an envelope already read from disk.
+    /// </summary>
+    /// <remarks>
+    /// Split out from <see cref="Read(string)"/> so a caller that is timing its phases can charge
+    /// the disk read and the decode to separate buckets - the two answer different questions when
+    /// a run refuses to scale, and one of them is not I/O at all.
+    /// </remarks>
+    /// <exception cref="Base64DecodingException">The bytes are not a decodable envelope.</exception>
+    public static XhtmlDocument ReadEnvelope(byte[] bytes)
     {
-        byte[] bytes = File.ReadAllBytes(path);
         byte[] payload = Base64InputDecoder.Decode(bytes);
 
         // ByteCount stays the size on disk: the progress figures, the disk-space estimate

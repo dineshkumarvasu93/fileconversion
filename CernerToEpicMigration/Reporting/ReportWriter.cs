@@ -1,8 +1,10 @@
-﻿using System.Globalization;
+﻿using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using CernerToEpicMigration.Configuration;
 using CernerToEpicMigration.Models;
 using CernerToEpicMigration.Monitoring;
+using CernerToEpicMigration.Processing;
 using Microsoft.Extensions.Logging;
 
 namespace CernerToEpicMigration.Reporting;
@@ -168,6 +170,12 @@ public sealed class ReportWriter : IDisposable
                 $"Average Concurrent Workers,{metrics.AverageConcurrency.ToString("F2", CultureInfo.InvariantCulture)}");
             report.AppendLine(
                 $"Worker Utilisation (%),{WorkerUtilisation(metrics).ToString("F1", CultureInfo.InvariantCulture)}");
+            // The scaling test. Files per second says how fast the run was; this says how fast one
+            // worker was, which is the part that should not change when workers are added. Compare
+            // it across runs at 1, 2 and 4 threads: flat means the threads are buying throughput,
+            // rising in step with the thread count means they are queueing for the same resource.
+            report.AppendLine(
+                $"Average Worker Service Time (ms),{metrics.AverageServiceTimeMs.ToString("F1", CultureInfo.InvariantCulture)}");
             report.AppendLine($"Batch Size,{_config.Processing.BatchSize}");
             report.AppendLine($"Total Files Found,{metrics.TotalFound}");
             report.AppendLine($"Total Files Processed,{processed}");
@@ -201,6 +209,9 @@ public sealed class ReportWriter : IDisposable
                     $"{folder.Elapsed:hh\\:mm\\:ss}"));
             }
 
+            AppendWorkerBreakdown(report, metrics);
+            AppendPhaseBreakdown(report, metrics);
+
             File.WriteAllText(SummaryReportPath, report.ToString(), Encoding.UTF8);
             HasSummaryReport = true;
         }
@@ -209,6 +220,133 @@ public sealed class ReportWriter : IDisposable
             _logger.LogError(exception, "The migration summary report could not be written under {Path}.", _config.ReportBasePath);
         }
     }
+
+    /// <summary>
+    /// Per-worker section of the summary: how many documents each worker slot handled and how
+    /// long it took over them.
+    /// </summary>
+    /// <remarks>
+    /// The counts answer "did the work spread evenly?" - with a shared queue they should come out
+    /// within a few percent of each other, and one slot far ahead of the rest means the others were
+    /// starved. The <c>Avg ms/File</c> column answers the more useful question: whether the workers
+    /// were converting in parallel or queueing. It is per-document wall-clock time for one worker,
+    /// so it is independent of how many workers ran; if it doubles when the thread count doubles,
+    /// the extra threads are waiting on something shared and the run will not get faster.
+    /// <para>
+    /// Rows count only documents that went through a conversion worker, so files rejected by the
+    /// unmatched-file sweep before the batches started are in the totals above but not here.
+    /// </para>
+    /// </remarks>
+    private static void AppendWorkerBreakdown(StringBuilder report, MetricsCollector metrics)
+    {
+        IReadOnlyList<WorkerStatistics> workers = metrics.GetWorkerStatistics();
+        if (workers.Count == 0)
+            return;
+
+        double runSeconds = metrics.Elapsed.TotalSeconds;
+
+        report.AppendLine();
+        report.AppendLine("--- Per-Worker Breakdown ---");
+        report.AppendLine("Worker Slot,Files Processed,Succeeded,Failed,Abandoned,Busy Time,Busy (% of run),Avg ms/File,Files Per Second");
+
+        foreach (WorkerStatistics worker in workers)
+        {
+            double busySeconds = worker.Busy.TotalSeconds;
+
+            report.AppendLine(string.Join(',',
+                worker.Slot.ToString(CultureInfo.InvariantCulture),
+                worker.Processed.ToString(CultureInfo.InvariantCulture),
+                worker.Succeeded.ToString(CultureInfo.InvariantCulture),
+                worker.Failed.ToString(CultureInfo.InvariantCulture),
+                worker.Abandoned.ToString(CultureInfo.InvariantCulture),
+                $"{worker.Busy:hh\\:mm\\:ss}",
+                (runSeconds <= 0 ? 0 : busySeconds / runSeconds * 100d).ToString("F1", CultureInfo.InvariantCulture),
+                worker.AverageMillisecondsPerFile.ToString("F1", CultureInfo.InvariantCulture),
+                (busySeconds <= 0 ? 0 : worker.Processed / busySeconds).ToString("F2", CultureInfo.InvariantCulture)));
+        }
+    }
+
+    /// <summary>
+    /// Where the time of a converted document went, summed over the run and split into the two
+    /// groups that call for opposite fixes.
+    /// </summary>
+    /// <remarks>
+    /// This is the section to read when adding threads stops adding throughput. The per-worker
+    /// service time above says a document got more expensive; this says which part of it did:
+    /// <list type="bullet">
+    /// <item><description>
+    /// <c>Import</c> and <c>Export</c> are Telerik, in-process, CPU-bound. Growing with the thread
+    /// count means the machine is out of cores, or the library is serialising internally - more
+    /// spindles will not help.
+    /// </description></item>
+    /// <item><description>
+    /// <c>Read</c>, <c>Write</c> and <c>Archive</c> are the file system. Growing with the thread
+    /// count means the workers are queueing on the volume, on the NTFS index of a directory they
+    /// all write to, or on an on-access virus scanner - more cores will not help.
+    /// </description></item>
+    /// </list>
+    /// The percentages are of measured time, not of the run: a worker also spends time on
+    /// bookkeeping and on retry backoff, and the <c>Unattributed</c> row is what is left of its
+    /// busy time once every phase is accounted for. A large one is itself a finding - it is time
+    /// spent inside the pipeline rather than inside a conversion.
+    /// </remarks>
+    private static void AppendPhaseBreakdown(StringBuilder report, MetricsCollector metrics)
+    {
+        ConversionPhases phases = metrics.PhaseTotals;
+        if (phases.TotalTicks == 0)
+            return;
+
+        long converted = metrics.Succeeded;
+        double measuredMs = TicksToMilliseconds(phases.TotalTicks);
+
+        report.AppendLine();
+        report.AppendLine("--- Phase Breakdown (successful conversions) ---");
+        report.AppendLine("Phase,Kind,Total Seconds,% of Measured,Avg ms/File");
+
+        AppendPhase(report, "Read input", "Disk", phases.ReadTicks, converted, measuredMs);
+        AppendPhase(report, "Decode Base64/charset", "CPU", phases.DecodeTicks, converted, measuredMs);
+        AppendPhase(report, "Validate content", "CPU", phases.ValidateTicks, converted, measuredMs);
+        AppendPhase(report, "Telerik import (XHTML)", "CPU", phases.ImportTicks, converted, measuredMs);
+        AppendPhase(report, "Telerik export (RTF)", "CPU", phases.ExportTicks, converted, measuredMs);
+        AppendPhase(report, "Write output", "Disk", phases.WriteTicks, converted, measuredMs);
+        AppendPhase(report, "Archive input", "Disk", phases.ArchiveTicks, converted, measuredMs);
+
+        long cpuTicks = phases.DecodeTicks + phases.ValidateTicks + phases.ImportTicks + phases.ExportTicks;
+        long diskTicks = phases.ReadTicks + phases.WriteTicks + phases.ArchiveTicks;
+
+        report.AppendLine();
+        AppendPhase(report, "CPU total", "CPU", cpuTicks, converted, measuredMs);
+        AppendPhase(report, "Disk total", "Disk", diskTicks, converted, measuredMs);
+
+        // Worker busy time that no phase claimed: slot bookkeeping, trace and report writing,
+        // retry backoff, and the failed documents that never reached a phase at all.
+        double busyMs = metrics.AverageServiceTimeMs * Math.Max(1, metrics.Processed);
+        double unattributedMs = busyMs - measuredMs;
+        if (unattributedMs > 0)
+        {
+            report.AppendLine(string.Join(',',
+                "Unattributed",
+                "Overhead",
+                (unattributedMs / 1000d).ToString("F1", CultureInfo.InvariantCulture),
+                (unattributedMs / measuredMs * 100d).ToString("F1", CultureInfo.InvariantCulture),
+                (converted == 0 ? 0 : unattributedMs / converted).ToString("F3", CultureInfo.InvariantCulture)));
+        }
+    }
+
+    private static void AppendPhase(
+        StringBuilder report, string name, string kind, long ticks, long files, double measuredMs)
+    {
+        double ms = TicksToMilliseconds(ticks);
+
+        report.AppendLine(string.Join(',',
+            Escape(name),
+            kind,
+            (ms / 1000d).ToString("F1", CultureInfo.InvariantCulture),
+            (measuredMs <= 0 ? 0 : ms / measuredMs * 100d).ToString("F1", CultureInfo.InvariantCulture),
+            (files == 0 ? 0 : ms / files).ToString("F3", CultureInfo.InvariantCulture)));
+    }
+
+    private static double TicksToMilliseconds(long ticks) => ticks * 1000d / Stopwatch.Frequency;
 
     private static double AverageFileSizeMb(long totalBytes, long fileCount) =>
         fileCount == 0 ? 0 : totalBytes / (1024d * 1024d) / fileCount;
