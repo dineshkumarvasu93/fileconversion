@@ -19,6 +19,7 @@ public sealed class Stage1Pipeline
 {
     private readonly MigrationConfig _config;
     private readonly FileDiscoveryService _discovery;
+    private readonly FolderClaimService _claims;
     private readonly FileManager _fileManager;
     private readonly IXhtmlToRtfConverter _converter;
     private readonly MetricsCollector _metrics;
@@ -33,6 +34,7 @@ public sealed class Stage1Pipeline
     public Stage1Pipeline(
         MigrationConfig config,
         FileDiscoveryService discovery,
+        FolderClaimService claims,
         FileManager fileManager,
         IXhtmlToRtfConverter converter,
         MetricsCollector metrics,
@@ -43,6 +45,7 @@ public sealed class Stage1Pipeline
     {
         _config = config;
         _discovery = discovery;
+        _claims = claims;
         _fileManager = fileManager;
         _converter = converter;
         _metrics = metrics;
@@ -103,13 +106,18 @@ public sealed class Stage1Pipeline
             return new Stage1Result { Completed = true, Folders = Array.Empty<FolderStatistics>() };
         }
 
-        IReadOnlyDictionary<string, int> fileCounts = PreScan(folders);
+        IReadOnlyDictionary<string, int> fileCounts = _claims.Enabled
+            ? SkipPreScanForClaiming(folders)
+            : PreScan(folders);
 
         using CancellationTokenSource runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _runCts = runCts;
         _metrics.Start();
 
         bool cancelled = false;
+
+        int claimed = 0;
+        int skipped = 0;
 
         foreach (DateFolder folder in folders)
         {
@@ -118,6 +126,17 @@ public sealed class Stage1Pipeline
                 cancelled = true;
                 break;
             }
+
+            // With claiming off this always succeeds and owns nothing, so a single-instance run
+            // walks exactly the list it discovered.
+            using FolderClaim? claim = _claims.TryClaim(folder);
+            if (claim is null)
+            {
+                skipped++;
+                continue;
+            }
+
+            claimed++;
 
             bool folderCompleted = await ProcessFolderAsync(
                     folder,
@@ -129,6 +148,9 @@ public sealed class Stage1Pipeline
 
             if (folderCompleted)
             {
+                // Recorded before the checkpoint: the claim is what stops another instance
+                // re-processing the folder, and the lease is released moments later on dispose.
+                claim.MarkCompleted();
                 checkpoint.CompletedFolders.Add(folder.Name);
                 _checkpointService.Save(checkpoint);
             }
@@ -137,6 +159,13 @@ public sealed class Stage1Pipeline
                 cancelled = true;
                 break;
             }
+        }
+
+        if (_claims.Enabled)
+        {
+            _logger.LogInformation(
+                "Instance {InstanceId} processed {Claimed} folder(s) and left {Skipped} to other instance(s).",
+                _config.InstanceId, claimed, skipped);
         }
 
         _metrics.Stop();
@@ -192,6 +221,28 @@ public sealed class Stage1Pipeline
 
         WarnIfDiskSpaceIsShort(inputBytes);
         return fileCounts;
+    }
+
+    /// <summary>
+    /// Replaces the pre-scan when the instances are claiming folders, so each one counts a folder
+    /// as it takes it.
+    /// </summary>
+    /// <remarks>
+    /// The pre-scan exists to total the whole input up front, which is exactly the wrong number
+    /// here: this instance will convert some unknowable subset of those folders, so a progress
+    /// bar built on the total would show it stalled at a third of a run it is not doing. Counting
+    /// per claimed folder makes each instance's totals its own work, and costs nothing extra -
+    /// the files of a folder are listed on the way in regardless.
+    /// </remarks>
+    private IReadOnlyDictionary<string, int> SkipPreScanForClaiming(IReadOnlyList<DateFolder> folders)
+    {
+        _logger.LogInformation(
+            "Instance {InstanceId} coordinating through {ClaimFolder}: {Folders} folder(s) available, " +
+            "each counted as it is claimed. Parallelism={Threads}, BatchSize={BatchSize}.",
+            _config.InstanceId, _claims.ClaimFolderPath, folders.Count,
+            _config.Processing.EffectiveParallelism, _config.Processing.BatchSize);
+
+        return new Dictionary<string, int>(StringComparer.Ordinal);
     }
 
     /// <summary>Processes one date folder batch by batch. Returns false if the run was stopped.</summary>

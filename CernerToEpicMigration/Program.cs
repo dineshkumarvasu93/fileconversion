@@ -146,11 +146,17 @@ public static class Program
         if (cli.BatchSize is int batchSize)
             config.Processing.BatchSize = batchSize;
 
+        if (cli.InstanceId is not null)
+            config.InstanceId = cli.InstanceId;
+
+        if (cli.CoordinationPath is not null)
+            config.CoordinationPath = cli.CoordinationPath;
+
         return config;
     }
 
     private const string LogOutputTemplate =
-        "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}";
+        "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Instance:l}{Message:lj}{NewLine}{Exception}";
 
     /// <summary>
     /// Two sinks over the same events, split by level.
@@ -176,8 +182,17 @@ public static class Program
 
         long sizeLimitBytes = config.LogFileSizeLimitMb * 1024L * 1024L;
 
+        // Stamped on every line so a log read on its own says which instance wrote it, and so the
+        // three consoles of a multi-instance run are told apart at a glance. A single-instance run
+        // enriches with an empty string and the line is unchanged. The :l in the output template
+        // is what keeps it out of quotes.
+        string instancePrefix = string.IsNullOrWhiteSpace(config.InstanceId)
+            ? string.Empty
+            : $"[{config.InstanceId}] ";
+
         LoggerConfiguration logger = new LoggerConfiguration()
             .MinimumLevel.Information()
+            .Enrich.WithProperty("Instance", instancePrefix)
             .WriteTo.File(
                 Path.Combine(logFolder, "migration_.log"),
                 rollingInterval: RollingInterval.Day,
@@ -218,6 +233,7 @@ public static class Program
 
         services.AddSingleton<PreflightCheck>();
         services.AddSingleton<FileDiscoveryService>();
+        services.AddSingleton<FolderClaimService>();
         services.AddSingleton<FileManager>();
         services.AddSingleton<IXhtmlToRtfConverter, TelerikXhtmlToRtfConverter>();
         services.AddSingleton<MetricsCollector>();
@@ -390,6 +406,12 @@ public static class Program
         Console.WriteLine("|            CERNER TO EPIC MIGRATION - STAGE 1: XHTML -> RTF                  |");
         Console.WriteLine("+==============================================================================+");
         Console.WriteLine($"  Version    : {version}   Host: {Environment.MachineName}   .NET {Environment.Version}");
+
+        if (!string.IsNullOrWhiteSpace(config.InstanceId))
+        {
+            Console.WriteLine($"  Instance   : {config.InstanceId}   PID: {Environment.ProcessId}");
+            Console.WriteLine($"  Claims     : {Path.GetFullPath(config.ClaimFolderPath)}");
+        }
         Console.WriteLine($"  Input      : {Path.GetFullPath(config.InputBasePath)}");
         Console.WriteLine($"  RTF output : {Path.GetFullPath(config.OutputRtfBasePath)}");
         Console.WriteLine($"  Reports    : {Path.GetFullPath(config.ReportBasePath)}");

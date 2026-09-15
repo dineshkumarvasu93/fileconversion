@@ -43,9 +43,18 @@ public sealed class FileDiscoveryService
             return new[] { new DateFolder(onlyDateFolder, path) };
         }
 
+        // The multi-instance claim folder defaults to a sub-folder of the input root, so it has
+        // to be excluded by path: it holds coordination files, not documents, and enumerating it
+        // as an input folder would have every instance "processing" the lease files.
+        string claimFolder = Path.GetFullPath(_config.ClaimFolderPath);
+
         List<DateFolder> folders = Directory.EnumerateDirectories(basePath)
             .Select(path => new DateFolder(Path.GetFileName(path), path))
             .Where(folder => !ReservedFolderNames.Contains(folder.Name, StringComparer.OrdinalIgnoreCase))
+            .Where(folder => !string.Equals(
+                Path.GetFullPath(folder.Path).TrimEnd(Path.DirectorySeparatorChar),
+                claimFolder.TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
             .OrderBy(folder => folder.Name, StringComparer.Ordinal)
             .ToList();
 

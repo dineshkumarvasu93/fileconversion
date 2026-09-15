@@ -20,6 +20,15 @@ public sealed class CommandLineOptions
     /// <summary>Restrict the run to a single date folder.</summary>
     public string? DateFolder { get; private set; }
 
+    /// <summary>
+    /// Name of this instance. Supplying it turns on folder claiming, so this run takes only the
+    /// folders no other instance holds.
+    /// </summary>
+    public string? InstanceId { get; private set; }
+
+    /// <summary>Folder the instances coordinate through. Defaults to one under the input root.</summary>
+    public string? CoordinationPath { get; private set; }
+
     /// <summary>Scan and report only - nothing is converted, moved or written.</summary>
     public bool DryRun { get; private set; }
 
@@ -67,6 +76,12 @@ public sealed class CommandLineOptions
                 case "--date-folder":
                     options.DateFolder = ReadValue(args, ref i, inlineValue, name, options.Errors);
                     break;
+                case "--instance-id":
+                    options.InstanceId = ReadValue(args, ref i, inlineValue, name, options.Errors);
+                    break;
+                case "--coordination":
+                    options.CoordinationPath = ReadValue(args, ref i, inlineValue, name, options.Errors);
+                    break;
                 case "--dry-run":
                     options.DryRun = true;
                     break;
@@ -105,6 +120,10 @@ public sealed class CommandLineOptions
 
         if (DateFolder is not null && DateFolder.AsSpan().IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             Errors.Add($"--date-folder must be a folder name, not a path: {DateFolder}");
+
+        // It is written into claim files and every log line, so it has to stay a single token.
+        if (InstanceId is not null && InstanceId.AsSpan().IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            Errors.Add($"--instance-id must not contain path characters: {InstanceId}");
     }
 
     private static string? ReadValue(string[] args, ref int index, string? inlineValue, string name, List<string> errors)
@@ -159,6 +178,11 @@ public sealed class CommandLineOptions
               --batch-size <size>     Override batch size (default: 1000)
               --stage <1>             Stage to run. Only stage 1 is implemented in this build
               --date-folder <name>    Process a single date folder only, e.g. 2026-08-01
+              --instance-id <name>    Name this instance and take only folders no other
+                                      instance has claimed. Required to run several
+                                      instances over one input root
+              --coordination <path>   Folder the instances claim through
+                                      (default: <input>\_migration_claims)
               --dry-run               Scan and report without converting or moving anything
               --resume                Skip date folders already completed per checkpoint.json
               --help                  Display this help

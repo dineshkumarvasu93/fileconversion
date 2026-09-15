@@ -22,6 +22,32 @@ public sealed class MigrationConfig
     /// <summary>Folder for the rolling Serilog log files.</summary>
     public string LogBasePath { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Identifies this instance in the log and in the claim files it writes. Set it - normally
+    /// from <c>--instance-id</c> - when several instances run over the same input root. Left
+    /// empty the run is a single instance: it claims nothing, skips nothing, and writes no
+    /// coordination files.
+    /// </summary>
+    public string InstanceId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Folder the instances coordinate through. Empty puts it under the input root, which is the
+    /// one location every instance over a given input is guaranteed to share.
+    /// </summary>
+    public string CoordinationPath { get; set; } = string.Empty;
+
+    /// <summary>Name of the coordination folder created under the input root by default.</summary>
+    public const string DefaultClaimFolderName = "_migration_claims";
+
+    /// <summary>
+    /// Resolved coordination folder - <see cref="CoordinationPath"/> when set, otherwise
+    /// <see cref="DefaultClaimFolderName"/> under the input root. Discovery excludes it, so a
+    /// default that lives inside the input root is not mistaken for an input folder.
+    /// </summary>
+    public string ClaimFolderPath => string.IsNullOrWhiteSpace(CoordinationPath)
+        ? Path.Combine(InputBasePath, DefaultClaimFolderName)
+        : CoordinationPath;
+
     public int LogRetainedFileCountLimit { get; set; } = 30;
 
     /// <summary>

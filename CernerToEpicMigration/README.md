@@ -84,11 +84,21 @@ rather than a failed overnight run:
 ## Scaling to multiple instances
 
 For very large volumes (hundreds of thousands to millions of files), several instances of this
-application can be run in parallel — one process per machine or per machine-core-budget, each given
-its own `InputBasePath`/`OutputRtfBasePath`/`ReportBasePath`/`LogBasePath` (or its own
-`--date-folder` against a shared input root). See
-[docs/MultiInstanceProcessing.md](docs/MultiInstanceProcessing.md) for the partitioning scheme, how
-duplicate processing is avoided, and performance/monitoring considerations at scale.
+application can be run in parallel against **one** shared `InputBasePath`. Give each instance an
+`--instance-id` and they divide the input folders between themselves at runtime: an instance claims
+a folder with a lock file in the coordination folder, processes it, marks it done and takes the next
+one nobody holds. No folder is named in configuration and none is assigned to an instance in
+advance, so the same configuration handles any number of folders.
+
+Each instance still needs its own `ReportBasePath` and `LogBasePath` — the run lock is per report
+folder — while the input, output and coordination paths are shared.
+
+```bash
+CernerToEpicMigration.exe --input <shared root> --output <shared out>     --coordination <shared coordination> --instance-id Instance-1 --threads 4
+```
+
+See [docs/MultiInstanceProcessing.md](docs/MultiInstanceProcessing.md) for the claim mechanism, how
+duplicate processing is avoided, the step-by-step run procedure and how to verify the result.
 
 ## Tests
 
@@ -112,6 +122,7 @@ dotnet run -- --input D:\Migration\Input --output D:\Migration\Output\rtf
 dotnet run -- --dry-run                       # scan and report only, nothing is touched
 dotnet run -- --date-folder 2026-08-01        # one date folder
 dotnet run -- --resume                        # skip date folders already completed
+dotnet run -- --instance-id Instance-1        # one of several instances over a shared input root
 dotnet run -- --help
 ```
 

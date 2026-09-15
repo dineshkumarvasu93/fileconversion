@@ -99,6 +99,7 @@ public sealed class TempWorkspace : IDisposable
         FileTraceWriter? traceWriter = null) => new(
         Config,
         new FileDiscoveryService(Config, NullLogger<FileDiscoveryService>.Instance),
+        new FolderClaimService(Config, NullLogger<FolderClaimService>.Instance),
         CreateFileManager(),
         converter ?? CreateConverter(),
         Metrics,
