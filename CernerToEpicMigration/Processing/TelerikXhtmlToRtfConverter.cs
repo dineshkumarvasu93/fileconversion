@@ -62,8 +62,18 @@ public sealed class TelerikXhtmlToRtfConverter : IXhtmlToRtfConverter
 
         long validateTicks = Lap(ref mark);
 
+        string xhtml = _options.RemoveScriptElementsBeforeRtf
+            ? XhtmlScriptRemover.Remove(input.Text)
+            : input.Text;
+
+        if (_options.RemoveDisplayElementsWithConfiguredStyle)
+            xhtml = XhtmlConfiguredStyleElementRemover.Remove(xhtml, _options.ElementStyleMatchText);
+
+        if (_options.RemoveHtmlRootNamespaceDeclarations)
+            xhtml = XhtmlRootNamespaceRemover.Remove(xhtml);
+
         HtmlFormatProvider htmlProvider = new();
-        RadFlowDocument document = htmlProvider.Import(input.Text, timeout);
+        RadFlowDocument document = htmlProvider.Import(xhtml, timeout);
         long importTicks = Lap(ref mark);
 
         RtfFormatProvider rtfProvider = new();

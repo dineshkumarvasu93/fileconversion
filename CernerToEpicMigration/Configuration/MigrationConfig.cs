@@ -117,6 +117,9 @@ public sealed class MigrationConfig
         if (string.IsNullOrWhiteSpace(Processing.FileSearchPattern))
             errors.Add("Processing.FileSearchPattern is not configured.");
 
+        if (Processing.RemoveDisplayElementsWithConfiguredStyle && string.IsNullOrWhiteSpace(Processing.ElementStyleMatchText))
+            errors.Add("Processing.ElementStyleMatchText cannot be empty when element removal is enabled.");
+
         if (Processing.MaxErrorLogFiles < 0)
             errors.Add("Processing.MaxErrorLogFiles cannot be negative (0 = no cap).");
 
@@ -224,6 +227,14 @@ public sealed class ProcessingOptions
     /// deliberately narrow it is.
     /// </remarks>
     public bool ValidateXhtmlContent { get; set; } = true;
+
+    public bool RemoveScriptElementsBeforeRtf { get; set; }
+
+    public bool RemoveHtmlRootNamespaceDeclarations { get; set; }
+
+    public bool RemoveDisplayElementsWithConfiguredStyle { get; set; }
+
+    public string ElementStyleMatchText { get; set; } = "display: none";
 
     /// <summary>Effective worker count after resolving the auto-detect value.</summary>
     public int EffectiveParallelism =>

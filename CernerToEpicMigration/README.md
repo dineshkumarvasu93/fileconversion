@@ -222,6 +222,10 @@ Two sinks over the same events, split by level; both roll daily **and** at `LogF
 | --- | --- | --- |
 | `ConversionTimeoutSeconds` | `60` | Telerik import/export timeout per document. Guards against one pathological file stalling a worker for the rest of the run. |
 | `ValidateXhtmlContent` | `true` | Reject payloads holding no XHTML. Telerik's importer never rejects anything — an empty file and binary noise both export a valid but meaningless RTF that counts as a success. Deliberately narrow: it asks whether there is markup at all, not whether it's good. |
+| `RemoveScriptElementsBeforeRtf` | `false` | Remove complete `<script>` elements before Telerik imports the XHTML. |
+| `RemoveHtmlRootNamespaceDeclarations` | `false` | Remove `xmlns` and prefixed `xmlns:*` attributes from the opening `<html>` tag before Telerik imports the XHTML. |
+| `RemoveDisplayElementsWithConfiguredStyle` | `false` | Enables removal of complete `<div>` and `<span>` elements whose inline style contains the configured match text before Telerik imports the XHTML. |
+| `ElementStyleMatchText` | `display: none` | Inline-style text used to identify elements for removal. Matching ignores case and whitespace. |
 | `OverwriteExistingRtf` | `true` | False makes an already-present output a failure instead — how you prove a re-run isn't silently redoing finished work. |
 | `EncodeRtfOutputAsBase64` | `false` | Wrap the RTF in a Base64 envelope. The name and `.rtf` extension are unchanged — only the bytes differ — so whatever consumes the output must switch over at the same time. |
 
