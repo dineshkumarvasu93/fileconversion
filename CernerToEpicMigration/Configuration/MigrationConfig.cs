@@ -236,6 +236,37 @@ public sealed class ProcessingOptions
 
     public string ElementStyleMatchText { get; set; } = "display: none";
 
+    /// <summary>
+    /// Wrap redeclaring elements' content in <c>s</c> before import. In CSS
+    /// <c>text-decoration</c> propagates as paint rather than inheriting, so a descendant
+    /// that redeclares it adds to the ancestor's lines; Telerik instead lets the
+    /// innermost declaration win, which silently drops an ancestor's
+    /// <c>line-through</c>. On by default - the wrap only fires where the element
+    /// declares a decoration while an ancestor paints <c>line-through</c>.
+    /// </summary>
+    public bool NormalizeNestedTextDecorations { get; set; } = true;
+
+    /// <summary>
+    /// Rewrite the nested 3-column table Cerner emits for bullet lists to a real
+    /// <c>ul</c>/<c>li</c> before import. Cerner never emits list markup: a bullet list is a
+    /// table of marker cell, spacer cell and a widthless item-text cell, itself nested three
+    /// tables deep. Telerik exports that depth as <c>\itap3</c> cell content and emits no
+    /// <c>\trowd</c> or <c>\cellx</c> row definitions for it, so the item text reaches the
+    /// file but a reader has no column widths to lay it out - the bullets show and the text
+    /// does not. On by default - the rewrite only fires on the exact marker/spacer/text
+    /// shape, so genuine data tables pass through untouched.
+    /// </summary>
+    public bool ConvertBulletTablesToLists { get; set; } = true;
+
+    /// <summary>
+    /// Remove <c>a</c> elements that have no <c>href</c> and no content before import. Cerner
+    /// places an empty named anchor before almost every section as an in-page jump target;
+    /// Telerik turns each one into a <c>HYPERLINK ""</c> field, which Word renders as
+    /// "Error! Hyperlink reference not valid." On by default - anchors with an address or
+    /// text pass through untouched.
+    /// </summary>
+    public bool RemoveEmptyAnchors { get; set; } = true;
+
     /// <summary>Effective worker count after resolving the auto-detect value.</summary>
     public int EffectiveParallelism =>
         MaxDegreeOfParallelism > 0 ? MaxDegreeOfParallelism : Environment.ProcessorCount;

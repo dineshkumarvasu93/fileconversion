@@ -158,6 +158,59 @@ public class ConversionTests
     }
 
     [Fact]
+    public void A_cerner_bullet_table_document_exports_with_visible_unicode_bullets()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "bullets.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "bullets.rtf");
+        TempWorkspace.WriteInput(
+            input,
+            """<?xml version="1.0" encoding="utf-8"?><html><body><div> <table style="table-layout: fixed; border-collapse: collapse;" valign="top"><tbody><tr><td valign="top"><div style="margin-top: 1em; margin-bottom: 1em; margin: 0px; padding-left: 15px;"><table width="100%"><tbody><tr><td valign="top" style="text-align: right; white-space: nowrap;" width="24"><div><span style="font: 1em serif;">&#8226;</span></div></td><td width="8"> </td><td valign="top"><div>Knee replacement (2004)</div></td></tr></tbody></table></div></td></tr></tbody></table> </div></body></html>""");
+
+        workspace.CreateConverter().Convert(input, output);
+
+        string rtf = File.ReadAllText(output);
+        Assert.Contains("Knee replacement (2004)", rtf, StringComparison.Ordinal);
+        Assert.Contains("\\u8226?", rtf, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u-3913?", rtf, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\listtext", rtf, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_strikethrough_on_an_ancestor_span_survives_into_the_rtf()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "strike.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "strike.rtf");
+        TempWorkspace.WriteInput(
+            input,
+            """<?xml version="1.0" encoding="utf-8"?><html><body><span style="font-size: 16pt;"><span style="color: rgb(243, 156, 18);"><span style="text-decoration: line-through;"><span style="font-weight: bold;"><span style="font-style: italic;"><span style="text-decoration: underline;">Test the sentence </span></span></span></span></span></span></body></html>""");
+
+        workspace.CreateConverter().Convert(input, output);
+
+        // \strike0 is strike OFF - assert the control word is followed by a non-digit.
+        Assert.Matches(@"\\strike(?![0-9])", File.ReadAllText(output));
+    }
+
+    [Fact]
+    public void Empty_named_anchors_do_not_become_invalid_hyperlink_fields()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "anchors.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "anchors.rtf");
+        TempWorkspace.WriteInput(
+            input,
+            """<?xml version="1.0" encoding="utf-8"?><html><body><a name="_2ae31cb6-bf8e-4960-beb2-1162a8181340"></a><div>Care Plan</div><a name="_7c0ccacc-f2ae-49dc-8970-96d2823d5d33"></a><div>Problems</div></body></html>""");
+
+        workspace.CreateConverter().Convert(input, output);
+
+        string rtf = File.ReadAllText(output);
+        Assert.Contains("Care Plan", rtf, StringComparison.Ordinal);
+        Assert.Contains("Problems", rtf, StringComparison.Ordinal);
+        Assert.DoesNotContain("HYPERLINK", rtf, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_reported_input_size_is_the_size_of_the_file_on_disk()
     {
         using TempWorkspace workspace = new();

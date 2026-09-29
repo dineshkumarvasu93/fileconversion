@@ -17,6 +17,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CernerToEpicMigration.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Telerik Document Processing - XHTML import and RTF export -->
     <PackageReference Include="Telerik.Documents.Core" Version="2026.2.514" />
     <PackageReference Include="Telerik.Documents.Flow" Version="2026.2.514" />
