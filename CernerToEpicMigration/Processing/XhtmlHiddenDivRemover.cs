@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 namespace CernerToEpicMigration.Processing;
 
 /// <summary>Removes configured-style <c>div</c> and <c>span</c> elements from XHTML.</summary>
-internal static partial class XhtmlConfiguredStyleElementRemover
+internal static class XhtmlConfiguredStyleElementRemover
 {
     #region Public Methods
 
@@ -14,7 +14,7 @@ internal static partial class XhtmlConfiguredStyleElementRemover
     /// <returns>The XHTML with matching elements removed.</returns>
     public static string Remove(string xhtml, string styleMatchText)
     {
-        MatchCollection tags = TagPattern().Matches(xhtml);
+        MatchCollection tags = XhtmlMarkup.TagPattern().Matches(xhtml);
         StringBuilder result = new(xhtml.Length);
         int copiedThrough = 0;
         int index = 0;
@@ -104,7 +104,7 @@ internal static partial class XhtmlConfiguredStyleElementRemover
         if (string.IsNullOrWhiteSpace(styleMatchText))
             return false;
 
-        Match styleAttribute = StyleAttributePattern().Match(attributes);
+        Match styleAttribute = XhtmlMarkup.StyleAttributePattern().Match(attributes);
         if (!styleAttribute.Success)
             return false;
 
@@ -124,16 +124,6 @@ internal static partial class XhtmlConfiguredStyleElementRemover
     /// <returns>The style text without whitespace.</returns>
     private static string NormalizeStyleText(string value) =>
         string.Concat(value.Where(character => !char.IsWhiteSpace(character)));
-
-    /// <summary>Creates matches for markup tokens while skipping comments and declarations.</summary>
-    /// <returns>A regex that matches XHTML tags and non-element markup tokens.</returns>
-    [GeneratedRegex("""<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?(?:[^?]|\?(?!>))*\?>|<![^>]*>|<(?<closing>/)?(?<name>[A-Za-z][A-Za-z0-9:._-]*)\b(?<attributes>(?:"[^"]*"|'[^']*'|[^'">])*)>""")]
-    private static partial Regex TagPattern();
-
-    /// <summary>Creates matches for an inline <c>style</c> attribute.</summary>
-    /// <returns>A regex that captures quoted or unquoted style values.</returns>
-    [GeneratedRegex("""(?:^|\s)style\s*=\s*(?:"(?<double>[^"]*)"|'(?<single>[^']*)'|(?<unquoted>[^\s>]+))""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex StyleAttributePattern();
 
     #endregion
 }

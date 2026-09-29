@@ -72,6 +72,17 @@ public sealed class TelerikXhtmlToRtfConverter : IXhtmlToRtfConverter
         if (_options.RemoveHtmlRootNamespaceDeclarations)
             xhtml = XhtmlRootNamespaceRemover.Remove(xhtml);
 
+        if (_options.RemoveEmptyAnchors)
+            xhtml = XhtmlEmptyAnchorRemover.Remove(xhtml);
+
+        // Decoration normalization runs first so item text already carries its unioned
+        // decorations by the time the list rewrite moves it into an li element.
+        if (_options.NormalizeNestedTextDecorations)
+            xhtml = XhtmlTextDecorationNormalizer.Normalize(xhtml);
+
+        if (_options.ConvertBulletTablesToLists)
+            xhtml = XhtmlBulletTableToListConverter.Convert(xhtml);
+
         HtmlFormatProvider htmlProvider = new();
         RadFlowDocument document = htmlProvider.Import(xhtml, timeout);
         long importTicks = Lap(ref mark);
