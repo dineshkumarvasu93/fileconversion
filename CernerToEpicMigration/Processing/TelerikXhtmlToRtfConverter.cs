@@ -83,6 +83,9 @@ public sealed class TelerikXhtmlToRtfConverter : IXhtmlToRtfConverter
         if (_options.ConvertBulletTablesToLists)
             xhtml = XhtmlBulletTableToListConverter.Convert(xhtml);
 
+        if (_options.ConvertUnorderedListsToBulletParagraphs)
+            xhtml = XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml);
+
         HtmlFormatProvider htmlProvider = new();
         RadFlowDocument document = htmlProvider.Import(xhtml, timeout);
         long importTicks = Lap(ref mark);

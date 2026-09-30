@@ -259,6 +259,15 @@ public sealed class ProcessingOptions
     public bool ConvertBulletTablesToLists { get; set; } = true;
 
     /// <summary>
+    /// Rewrite a standard <c>ul</c>/<c>li</c> list to explicit bullet paragraphs with
+    /// hanging indents before import. Telerik's RTF list definition maps the bullet to a
+    /// Symbol-font private-use character (U+F0B7) that Word may not display; an explicit
+    /// U+2022 paragraph always renders. On by default - <c>list-style-type: none</c> and
+    /// unrecognized markers pass through untouched.
+    /// </summary>
+    public bool ConvertUnorderedListsToBulletParagraphs { get; set; } = true;
+
+    /// <summary>
     /// Remove <c>a</c> elements that have no <c>href</c> and no content before import. Cerner
     /// places an empty named anchor before almost every section as an in-page jump target;
     /// Telerik turns each one into a <c>HYPERLINK ""</c> field, which Word renders as
