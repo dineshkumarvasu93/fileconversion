@@ -177,6 +177,26 @@ public class ConversionTests
     }
 
     [Fact]
+    public void A_cerner_unordered_list_document_exports_with_visible_unicode_bullets()
+    {
+        using TempWorkspace workspace = new();
+        string input = Path.Combine(workspace.InputPath, "list.xhtml");
+        string output = Path.Combine(workspace.OutputPath, "list.rtf");
+        TempWorkspace.WriteInput(
+            input,
+            """<?xml version="1.0" encoding="utf-8"?><html><body><div class="ddemrcontent" id="_c72f" dd:contenttype="PROCEDURES"><ul style="margin: 0px; padding-left: 15px; list-style-type: disc;" xmlns:dd="DynamicDocumentation"><li class="ddemrcontentitem ddremovable" id="_6a33" dd:contenttype="PROCEDURES" dd:entityid="2612261207">Colonoscopy, flexible; with biopsy, single or multiple (04/26/2023)</li><li class="ddemrcontentitem ddremovable" id="_8ac5" dd:contenttype="PROCEDURES" dd:entityid="2612447193">EGD - Esophagogastroduodenoscopy</li></ul></div></body></html>""");
+
+        workspace.CreateConverter().Convert(input, output);
+
+        string rtf = File.ReadAllText(output);
+        Assert.Contains("Colonoscopy", rtf, StringComparison.Ordinal);
+        Assert.Contains("EGD - Esophagogastroduodenoscopy", rtf, StringComparison.Ordinal);
+        Assert.Contains("\\u8226?", rtf, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u-3913?", rtf, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\listtext", rtf, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_strikethrough_on_an_ancestor_span_survives_into_the_rtf()
     {
         using TempWorkspace workspace = new();

@@ -92,6 +92,85 @@ public class XhtmlNormalizerTests
     }
 
     [Fact]
+    public void A_cerner_unordered_list_becomes_explicit_bullet_paragraphs()
+    {
+        string xhtml =
+            """<div class="ddemrcontent" id="_c72f" dd:contenttype="PROCEDURES"><ul style="margin: 0px; padding-left: 15px; list-style-type: disc;" xmlns:dd="DynamicDocumentation"><li class="ddemrcontentitem ddremovable" id="_6a33" dd:contenttype="PROCEDURES" dd:entityid="2612261207">Colonoscopy, flexible; with biopsy, single or multiple (04/26/2023)</li><li class="ddemrcontentitem ddremovable" id="_8ac5" dd:contenttype="PROCEDURES" dd:entityid="2612447193">EGD - Esophagogastroduodenoscopy</li></ul></div>""";
+
+        string result = XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml);
+
+        Assert.Contains("<div style=\"margin-left: 32px; text-indent: -17px;\">&#8226;&#160;Colonoscopy, flexible; with biopsy, single or multiple (04/26/2023)</div>", result, StringComparison.Ordinal);
+        Assert.Contains("<div style=\"margin-left: 32px; text-indent: -17px;\">&#8226;&#160;EGD - Esophagogastroduodenoscopy</div>", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("<ul", result, StringComparison.Ordinal);
+        Assert.DoesNotContain("<li", result, StringComparison.Ordinal);
+        Assert.Contains("""<div class="ddemrcontent" id="_c72f" dd:contenttype="PROCEDURES">""", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unstyled_unordered_list_uses_the_disc_marker()
+    {
+        string xhtml = "<ul><li>a</li></ul>";
+
+        Assert.Equal(
+            "<div style=\"margin-left: 32px; text-indent: -17px;\">&#8226;&#160;a</div>",
+            XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml));
+    }
+
+    [Fact]
+    public void Circle_and_square_markers_map_to_their_unicode_bullets()
+    {
+        Assert.Equal(
+            "<div style=\"margin-left: 32px; text-indent: -17px;\">&#9702;&#160;a</div>",
+            XhtmlUnorderedListToBulletParagraphConverter.Convert("""<ul style="list-style-type: circle;"><li>a</li></ul>"""));
+
+        Assert.Equal(
+            "<div style=\"margin-left: 32px; text-indent: -17px;\">&#9642;&#160;a</div>",
+            XhtmlUnorderedListToBulletParagraphConverter.Convert("""<ul style="list-style-type: square;"><li>a</li></ul>"""));
+
+        Assert.Equal(
+            "<div style=\"margin-left: 32px; text-indent: -17px;\">&#9642;&#160;a</div>",
+            XhtmlUnorderedListToBulletParagraphConverter.Convert("""<ul style="list-style: square inside;"><li>a</li></ul>"""));
+    }
+
+    [Fact]
+    public void A_list_with_marker_none_is_returned_unchanged()
+    {
+        string xhtml = """<ul style="list-style-type: none;"><li>a</li></ul>""";
+
+        Assert.Equal(xhtml, XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml));
+    }
+
+    [Fact]
+    public void A_list_with_stray_content_between_items_is_returned_unchanged()
+    {
+        string strayText = "<ul><li>a</li> stray <li>b</li></ul>";
+        string strayMarkup = "<ul><li>a</li><p>note</p><li>b</li></ul>";
+
+        Assert.Equal(strayText, XhtmlUnorderedListToBulletParagraphConverter.Convert(strayText));
+        Assert.Equal(strayMarkup, XhtmlUnorderedListToBulletParagraphConverter.Convert(strayMarkup));
+    }
+
+    [Fact]
+    public void Nested_unordered_lists_convert_innermost_first()
+    {
+        string xhtml = "<ul><li>outer<ul><li>inner</li></ul></li></ul>";
+
+        string result = XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml);
+
+        Assert.Equal("<div style=\"margin-left: 32px; text-indent: -17px;\">&#8226;&#160;outer<div style=\"margin-left: 32px; text-indent: -17px;\">&#8226;&#160;inner</div></div>", result);
+    }
+
+    [Fact]
+    public void The_unordered_list_conversion_is_idempotent()
+    {
+        string xhtml = """<ul style="list-style-type: disc;"><li>a</li><li>b</li></ul>""";
+
+        string once = XhtmlUnorderedListToBulletParagraphConverter.Convert(xhtml);
+
+        Assert.Equal(once, XhtmlUnorderedListToBulletParagraphConverter.Convert(once));
+    }
+
+    [Fact]
     public void A_descendant_decoration_gains_the_keywords_its_ancestors_paint()
     {
         string xhtml =

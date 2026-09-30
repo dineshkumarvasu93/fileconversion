@@ -60,10 +60,10 @@ internal static partial class XhtmlBulletTableToListConverter
         for (int index = 0; index < tags.Count; index++)
         {
             Match opening = tags[index];
-            if (!IsOpeningTag(opening, "table"))
+            if (!XhtmlMarkup.IsOpeningTag(opening, "table"))
                 continue;
 
-            int closingIndex = FindMatchingClose(tags, index);
+            int closingIndex = XhtmlMarkup.FindMatchingClose(tags, index);
             if (closingIndex < 0)
                 continue;
 
@@ -123,10 +123,10 @@ internal static partial class XhtmlBulletTableToListConverter
         for (int index = openIndex + 1; index < closeIndex; index++)
         {
             Match tag = tags[index];
-            if (!IsOpeningTag(tag, "tr"))
+            if (!XhtmlMarkup.IsOpeningTag(tag, "tr"))
                 continue;
 
-            int rowClose = FindMatchingClose(tags, index);
+            int rowClose = XhtmlMarkup.FindMatchingClose(tags, index);
             if (rowClose < 0 || rowClose >= closeIndex)
                 return false;
 
@@ -180,10 +180,10 @@ internal static partial class XhtmlBulletTableToListConverter
         for (int index = rowIndex + 1; index < rowClose; index++)
         {
             Match tag = tags[index];
-            if (!IsOpeningTag(tag, "td"))
+            if (!XhtmlMarkup.IsOpeningTag(tag, "td"))
                 continue;
 
-            int cellClose = FindMatchingClose(tags, index);
+            int cellClose = XhtmlMarkup.FindMatchingClose(tags, index);
             if (cellClose < 0 || cellClose >= rowClose)
                 return [];
 
@@ -193,44 +193,6 @@ internal static partial class XhtmlBulletTableToListConverter
 
         return cells;
     }
-
-    /// <summary>Finds the closing tag matching an opening tag at <paramref name="openIndex"/>.</summary>
-    /// <param name="tags">The pre-matched markup tokens.</param>
-    /// <param name="openIndex">The index of the opening tag.</param>
-    /// <returns>The index of the matching closing tag, or -1 for unbalanced markup.</returns>
-    private static int FindMatchingClose(MatchCollection tags, int openIndex)
-    {
-        string name = tags[openIndex].Groups["name"].Value;
-        int depth = 1;
-        for (int index = openIndex + 1; index < tags.Count; index++)
-        {
-            Match nested = tags[index];
-            if (!nested.Groups["name"].Value.Equals(name, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            if (nested.Groups["closing"].Success)
-            {
-                if (--depth == 0)
-                    return index;
-            }
-            else if (!nested.Groups["attributes"].Value.TrimEnd().EndsWith('/'))
-            {
-                depth++;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>Determines whether a match is an opening tag of the given element.</summary>
-    /// <param name="tag">The parsed XHTML tag.</param>
-    /// <param name="name">The element name to compare.</param>
-    /// <returns><see langword="true"/> for a non-closing, non-self-closing tag of that name.</returns>
-    private static bool IsOpeningTag(Match tag, string name) =>
-        tag.Groups["name"].Success &&
-        !tag.Groups["closing"].Success &&
-        tag.Groups["name"].Value.Equals(name, StringComparison.OrdinalIgnoreCase) &&
-        !tag.Groups["attributes"].Value.TrimEnd().EndsWith('/');
 
     /// <summary>
     /// Verifies the table holds nothing outside its rows that the rewrite would drop:
@@ -350,10 +312,10 @@ internal static partial class XhtmlBulletTableToListConverter
     {
         string trimmed = markup.Trim();
         MatchCollection tags = XhtmlMarkup.TagPattern().Matches(trimmed);
-        if (tags.Count == 0 || !IsOpeningTag(tags[0], "div") || tags[0].Index != 0)
+        if (tags.Count == 0 || !XhtmlMarkup.IsOpeningTag(tags[0], "div") || tags[0].Index != 0)
             return markup;
 
-        int divClose = FindMatchingClose(tags, 0);
+        int divClose = XhtmlMarkup.FindMatchingClose(tags, 0);
         if (divClose != tags.Count - 1)
             return markup;
 
